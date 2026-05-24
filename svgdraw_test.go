@@ -241,3 +241,40 @@ func TestHSL(t *testing.T) {
 		return
 	}
 }
+
+func TestTextAndPattern(t *testing.T) {
+	svgStr := `
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <rect width="10" height="10" fill="#FF0000" />
+      <rect x="10" y="10" width="10" height="10" fill="#0000FF" />
+    </pattern>
+  </defs>
+
+  <rect x="10" y="10" width="180" height="80" fill="url(#grid)" />
+
+  <text x="10" y="130" font-family="sans-serif" font-size="30" fill="url(#grid)" stroke="#00FF00" stroke-width="1.5">Hello</text>
+  
+  <text x="10" y="170" font-family="sans-serif" font-size="20" fill="#FF00FF">
+    TSpan <tspan fill="#00FFFF" dx="5" dy="-5">Text</tspan>!
+  </text>
+</svg>
+`
+	icon, err := ReadIconStream(strings.NewReader(svgStr), StrictErrorMode)
+	if err != nil {
+		t.Fatalf("Failed to parse SVG: %v", err)
+	}
+
+	w, h := int(icon.ViewBox.W), int(icon.ViewBox.H)
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+
+	scannerGV := NewScannerGV(w, h, img, img.Bounds())
+	raster := NewDasher(w, h, scannerGV)
+	icon.Draw(raster, 1.0)
+
+	err = SaveToPngFile("testdata/text_pattern_test.png", img)
+	if err != nil {
+		t.Fatalf("Failed to save output PNG: %v", err)
+	}
+}

@@ -29,7 +29,7 @@ import (
 // if it does not handle an element found in the icon file. Ignore warnings is
 // the default if no ErrorMode value is provided.
 func ReadIconStream(stream io.Reader, errMode ...ErrorMode) (*SvgIcon, error) {
-	icon := &SvgIcon{Defs: make(map[string][]definition), Grads: make(map[string]*rasterx.Gradient), Transform: rasterx.Identity}
+	icon := &SvgIcon{Defs: make(map[string][]definition), Grads: make(map[string]*rasterx.Gradient), Patterns: make(map[string]*Pattern), Transform: rasterx.Identity}
 	cursor := &IconCursor{StyleStack: []PathStyle{DefaultStyle}, icon: icon}
 	if len(errMode) > 0 {
 		cursor.ErrorMode = errMode[0]
@@ -71,6 +71,18 @@ func ReadIconStream(stream io.Reader, errMode ...ErrorMode) (*SvgIcon, error) {
 						Tag: "endg",
 					})
 				}
+			case "pattern":
+				if cursor.inDefs {
+					cursor.currentDef = append(cursor.currentDef, definition{
+						Tag: "endpattern",
+					})
+				}
+			case "text":
+				cursor.inText = false
+				err = cursor.compileText()
+				if err != nil {
+					return icon, err
+				}
 			case "title":
 				cursor.inTitleText = false
 			case "desc":
@@ -102,6 +114,22 @@ func ReadIconStream(stream io.Reader, errMode ...ErrorMode) (*SvgIcon, error) {
 			}
 			if cursor.inDefsStyle {
 				classInfo = string(se)
+			}
+			if cursor.inText {
+				cursor.textFragments = append(cursor.textFragments, textFragment{
+					text:  string(se),
+					style: cursor.StyleStack[len(cursor.StyleStack)-1],
+					x:     cursor.textX,
+					y:     cursor.textY,
+					dx:    cursor.textDx,
+					dy:    cursor.textDy,
+					hasX:  cursor.hasTextX,
+					hasY:  cursor.hasTextY,
+				})
+				cursor.textDx = 0
+				cursor.textDy = 0
+				cursor.hasTextX = false
+				cursor.hasTextY = false
 			}
 		}
 	}

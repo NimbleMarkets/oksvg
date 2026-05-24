@@ -47,6 +47,12 @@ func (svgp *SvgPath) DrawTransformed(r *rasterx.Dasher, opacity float64, t raste
 				fillerColor.Bounds.W, fillerColor.Bounds.H = mxx-mnx, mxy-mny
 			}
 			rf.SetColor(fillerColor.GetColorFunction(svgp.FillOpacity * opacity))
+		case *Pattern:
+			fRect := rf.Scanner.GetPathExtent()
+			mnx, mny := float64(fRect.Min.X)/64, float64(fRect.Min.Y)/64
+			mxx, mxy := float64(fRect.Max.X)/64, float64(fRect.Max.Y)/64
+			objBounds := struct{ X, Y, W, H float64 }{mnx, mny, mxx - mnx, mxy - mny}
+			rf.SetColor(fillerColor.GetColorFunction(svgp.FillOpacity*opacity, objBounds, svgp.mAdder.M))
 		}
 		rf.Draw()
 		// default is true
@@ -83,6 +89,12 @@ func (svgp *SvgPath) DrawTransformed(r *rasterx.Dasher, opacity float64, t raste
 				linerColor.Bounds.W, linerColor.Bounds.H = mxx-mnx, mxy-mny
 			}
 			r.SetColor(linerColor.GetColorFunction(svgp.LineOpacity * opacity))
+		case *Pattern:
+			fRect := r.Scanner.GetPathExtent()
+			mnx, mny := float64(fRect.Min.X)/64, float64(fRect.Min.Y)/64
+			mxx, mxy := float64(fRect.Max.X)/64, float64(fRect.Max.Y)/64
+			objBounds := struct{ X, Y, W, H float64 }{mnx, mny, mxx - mnx, mxy - mny}
+			r.SetColor(linerColor.GetColorFunction(svgp.LineOpacity*opacity, objBounds, svgp.mAdder.M))
 		}
 		r.Draw()
 	}

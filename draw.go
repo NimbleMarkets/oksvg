@@ -36,6 +36,27 @@ var (
 		"title":          titleF,
 		"linearGradient": linearGradientF,
 		"radialGradient": radialGradientF,
+		"pattern":        patternF,
+		"text":           textF,
+		"tspan":          tspanF,
+	}
+
+	patternF svgFunc = func(*IconCursor, []xml.Attr) error { return nil }
+
+	textF svgFunc = func(c *IconCursor, attrs []xml.Attr) error {
+		c.inText = true
+		c.textFragments = nil
+		c.textX = 0
+		c.textY = 0
+		c.textDx = 0
+		c.textDy = 0
+		c.hasTextX = false
+		c.hasTextY = false
+		return readTextCoordAttrs(c, attrs)
+	}
+
+	tspanF svgFunc = func(c *IconCursor, attrs []xml.Attr) error {
+		return readTextCoordAttrs(c, attrs)
 	}
 
 	svgF svgFunc = func(c *IconCursor, attrs []xml.Attr) error {
@@ -389,4 +410,29 @@ func init() {
 	// avoids cyclical static declaration
 	// called on package initialization
 	drawFuncs["use"] = useF
+}
+
+// readTextCoordAttrs reads x/y/dx/dy attributes shared by <text> and <tspan>
+// and propagates parseFloat errors instead of silently zeroing the coordinate,
+// matching the error-handling style of the other shape draw funcs.
+func readTextCoordAttrs(c *IconCursor, attrs []xml.Attr) error {
+	var err error
+	for _, attr := range attrs {
+		switch attr.Name.Local {
+		case "x":
+			c.textX, err = parseFloat(attr.Value, 64)
+			c.hasTextX = true
+		case "y":
+			c.textY, err = parseFloat(attr.Value, 64)
+			c.hasTextY = true
+		case "dx":
+			c.textDx, err = parseFloat(attr.Value, 64)
+		case "dy":
+			c.textDy, err = parseFloat(attr.Value, 64)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
