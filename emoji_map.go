@@ -1,3 +1,5 @@
+//go:build darwin
+
 package oksvg
 
 // emojiFlagGlyphs maps two-letter country codes to their glyph indices in Apple Color Emoji.

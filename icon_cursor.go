@@ -104,11 +104,6 @@ func resolveFallbackGlyph(r rune) (*sfnt.Font, sfnt.GlyphIndex) {
 	return nil, 0
 }
 
-func isAppleColorEmoji(f *sfnt.Font, buf *sfnt.Buffer) bool {
-	name, err := f.Name(buf, sfnt.NameID(1))
-	return err == nil && strings.Contains(name, "Apple Color Emoji")
-}
-
 func isBold(weight string) bool {
 	weight = strings.ToLower(strings.TrimSpace(weight))
 	if weight == "bold" || weight == "bolder" {
@@ -173,50 +168,14 @@ func init() {
 	}
 
 	// Try loading some common system fonts
-	for _, info := range []struct {
-		name string
-		path string
-	}{
-		// macOS
-		{"arial", "/System/Library/Fonts/Supplemental/Arial.ttf"},
-		{"arial-bold", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"},
-		{"arial black", "/System/Library/Fonts/Supplemental/Arial Black.ttf"},
-		{"arial black-bold", "/System/Library/Fonts/Supplemental/Arial Black.ttf"},
-		{"impact", "/System/Library/Fonts/Supplemental/Impact.ttf"},
-		{"impact-bold", "/System/Library/Fonts/Supplemental/Impact.ttf"},
-
-		// Windows
-		{"arial", "C:\\Windows\\Fonts\\arial.ttf"},
-		{"arial-bold", "C:\\Windows\\Fonts\\arialbd.ttf"},
-		{"arial black", "C:\\Windows\\Fonts\\ariblk.ttf"},
-		{"arial black-bold", "C:\\Windows\\Fonts\\ariblk.ttf"},
-		{"impact", "C:\\Windows\\Fonts\\impact.ttf"},
-		{"impact-bold", "C:\\Windows\\Fonts\\impact.ttf"},
-
-		// Linux (msttcorefonts)
-		{"arial", "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"},
-		{"arial-bold", "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf"},
-		{"arial black", "/usr/share/fonts/truetype/msttcorefonts/Arial_Black.ttf"},
-		{"arial black-bold", "/usr/share/fonts/truetype/msttcorefonts/Arial_Black.ttf"},
-		{"impact", "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"},
-		{"impact-bold", "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"},
-	} {
+	for _, info := range systemFonts {
 		if data, err := os.ReadFile(info.path); err == nil {
 			_ = RegisterFont(info.name, data)
 		}
 	}
 
 	// Try loading some emoji/symbol fonts
-	for _, info := range []struct {
-		name string
-		path string
-		coll bool
-	}{
-		{"emoji", "/System/Library/Fonts/Apple Color Emoji.ttc", true},
-		{"symbols", "/System/Library/Fonts/Apple Symbols.ttf", false},
-		{"emoji", "C:\\Windows\\Fonts\\seguiemj.ttf", false},
-		{"emoji", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", false},
-	} {
+	for _, info := range emojiFonts {
 		if data, err := os.ReadFile(info.path); err == nil {
 			if info.coll {
 				_ = RegisterFontCollection(info.name, data)
@@ -845,10 +804,10 @@ func (c *IconCursor) compileText() error {
 				fontRegistryMu.RLock()
 				emojiFont := fontRegistry["emoji"]
 				fontRegistryMu.RUnlock()
-				if emojiFont != nil && isAppleColorEmoji(emojiFont, &fontBuf) {
-					if gIdx, ok := emojiFlagGlyphs[code]; ok {
+				if emojiFont != nil {
+					if gIdx, ok := resolveFlagGlyph(code, emojiFont, &fontBuf); ok {
 						fontObjToUse = emojiFont
-						idx = sfnt.GlyphIndex(gIdx)
+						idx = gIdx
 						isFlag = true
 						i++
 					}
@@ -941,10 +900,10 @@ func (c *IconCursor) compileText() error {
 				fontRegistryMu.RLock()
 				emojiFont := fontRegistry["emoji"]
 				fontRegistryMu.RUnlock()
-				if emojiFont != nil && isAppleColorEmoji(emojiFont, &fontBuf) {
-					if gIdx, ok := emojiFlagGlyphs[code]; ok {
+				if emojiFont != nil {
+					if gIdx, ok := resolveFlagGlyph(code, emojiFont, &fontBuf); ok {
 						fontObjToUse = emojiFont
-						idx = sfnt.GlyphIndex(gIdx)
+						idx = gIdx
 						isFlag = true
 						i++
 					}
