@@ -7,6 +7,12 @@ import (
 	"golang.org/x/image/font/sfnt"
 )
 
+const (
+	tagTTCF = 0x74746366 // 'ttcf' collection header tag
+	tagSBIX = 0x73626978 // 'sbix' table tag
+	tagPNG  = 0x706e6720 // 'png ' graphic type tag
+)
+
 // parseSBIX searches the font bytes for the 'sbix' table and extracts
 // the raw PNG bytes, origin offsets, and native design size (maxPPEM) for a given glyph index.
 func parseSBIX(fontBytes []byte, fontIndex int, glyphIndex int) (pngBytes []byte, originX, originY int, maxPPEM int, err error) {
@@ -17,7 +23,7 @@ func parseSBIX(fontBytes []byte, fontIndex int, glyphIndex int) (pngBytes []byte
 	offset := 0
 	// Check if TTC
 	magic := binary.BigEndian.Uint32(fontBytes[0:4])
-	if magic == 0x74746366 { // 'ttcf'
+	if magic == tagTTCF {
 		numFonts := binary.BigEndian.Uint32(fontBytes[8:12])
 		if fontIndex < 0 || fontIndex >= int(numFonts) {
 			return nil, 0, 0, 0, errors.New("font index out of range")
@@ -39,7 +45,7 @@ func parseSBIX(fontBytes []byte, fontIndex int, glyphIndex int) (pngBytes []byte
 			break
 		}
 		tag := binary.BigEndian.Uint32(fontBytes[tableOffset : tableOffset+4])
-		if tag == 0x73626978 { // 'sbix'
+		if tag == tagSBIX {
 			sbixOffset = int(binary.BigEndian.Uint32(fontBytes[tableOffset+8 : tableOffset+12]))
 			sbixLength = int(binary.BigEndian.Uint32(fontBytes[tableOffset+12 : tableOffset+16]))
 			break
@@ -110,7 +116,7 @@ func parseSBIX(fontBytes []byte, fontIndex int, glyphIndex int) (pngBytes []byte
 	originOffsetY := int(int16(binary.BigEndian.Uint16(fontBytes[absStart+2 : absStart+4])))
 
 	graphicType := binary.BigEndian.Uint32(fontBytes[absStart+4 : absStart+8])
-	if graphicType != 0x706e6720 { // 'png '
+	if graphicType != tagPNG {
 		return nil, 0, 0, 0, errors.New("unsupported graphic type (not png)")
 	}
 
