@@ -6,6 +6,8 @@
 package oksvg
 
 import (
+	"image/draw"
+
 	"github.com/srwiley/rasterx"
 )
 
@@ -18,7 +20,9 @@ type SvgIcon struct {
 	Patterns     map[string]*Pattern
 	Defs         map[string][]definition
 	SVGPaths     []SvgPath
+	SVGImages    []SvgImage
 	Transform    rasterx.Matrix2D
+	DrawTarget   draw.Image
 	classes      map[string]styleAttribute
 }
 
@@ -27,6 +31,11 @@ type SvgIcon struct {
 func (s *SvgIcon) Draw(r *rasterx.Dasher, opacity float64) {
 	for _, svgp := range s.SVGPaths {
 		svgp.DrawTransformed(r, opacity, s.Transform)
+	}
+	if s.DrawTarget != nil {
+		for _, svgi := range s.SVGImages {
+			svgi.DrawTransformed(s.DrawTarget, opacity, s.Transform)
+		}
 	}
 }
 

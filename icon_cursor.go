@@ -6,10 +6,12 @@
 package oksvg
 
 import (
+	"bytes"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"image/color"
+	"image/png"
 	"log"
 	"math"
 	"os"
@@ -41,8 +43,10 @@ type textFragment struct {
 // fontRegistry maps font-family names to parsed sfnt.Fonts. Protected by
 // fontRegistryMu so RegisterFont and SVG parsing can run concurrently.
 var (
-	fontRegistryMu sync.RWMutex
-	fontRegistry   = map[string]*sfnt.Font{}
+	fontRegistryMu    sync.RWMutex
+	fontRegistry      = map[string]*sfnt.Font{}
+	fontBytesRegistry = map[string][]byte{}
+	fontIndexRegistry = map[string]int{}
 )
 
 // RegisterFont registers a font under the given family name.
@@ -52,9 +56,57 @@ func RegisterFont(family string, fontBytes []byte) error {
 		return err
 	}
 	fontRegistryMu.Lock()
-	fontRegistry[strings.ToLower(family)] = f
+	name := strings.ToLower(family)
+	fontRegistry[name] = f
+	fontBytesRegistry[name] = fontBytes
+	fontIndexRegistry[name] = 0
 	fontRegistryMu.Unlock()
 	return nil
+}
+
+// RegisterFontCollection registers all fonts inside a TTC/collection.
+func RegisterFontCollection(family string, collectionBytes []byte) error {
+	coll, err := sfnt.ParseCollection(collectionBytes)
+	if err != nil {
+		return err
+	}
+	fontRegistryMu.Lock()
+	defer fontRegistryMu.Unlock()
+	for i := 0; i < coll.NumFonts(); i++ {
+		f, err := coll.Font(i)
+		if err == nil {
+			name := strings.ToLower(family)
+			nameIdx := name + "-" + strconv.Itoa(i)
+			fontRegistry[name] = f
+			fontBytesRegistry[name] = collectionBytes
+			fontIndexRegistry[name] = i
+
+			fontRegistry[nameIdx] = f
+			fontBytesRegistry[nameIdx] = collectionBytes
+			fontIndexRegistry[nameIdx] = i
+		}
+	}
+	return nil
+}
+
+func resolveFallbackGlyph(r rune) (*sfnt.Font, sfnt.GlyphIndex) {
+	fontRegistryMu.RLock()
+	defer fontRegistryMu.RUnlock()
+
+	var fontBuf sfnt.Buffer
+	for _, name := range []string{"emoji", "emoji-0", "emoji-1", "symbols", "default"} {
+		if f, ok := fontRegistry[name]; ok {
+			if idx, err := f.GlyphIndex(&fontBuf, r); err == nil && idx != 0 {
+				return f, idx
+			}
+		}
+	}
+	return nil, 0
+}
+
+func isAppleColorEmoji(f *sfnt.Font, buf *sfnt.Buffer) bool {
+	name, err := f.Name(buf, sfnt.NameID(1))
+	return err == nil && strings.Contains(name, "Apple Color Emoji")
 }
 
 func isBold(weight string) bool {
@@ -151,6 +203,26 @@ func init() {
 	} {
 		if data, err := os.ReadFile(info.path); err == nil {
 			_ = RegisterFont(info.name, data)
+		}
+	}
+
+	// Try loading some emoji/symbol fonts
+	for _, info := range []struct {
+		name string
+		path string
+		coll bool
+	}{
+		{"emoji", "/System/Library/Fonts/Apple Color Emoji.ttc", true},
+		{"symbols", "/System/Library/Fonts/Apple Symbols.ttf", false},
+		{"emoji", "C:\\Windows\\Fonts\\seguiemj.ttf", false},
+		{"emoji", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", false},
+	} {
+		if data, err := os.ReadFile(info.path); err == nil {
+			if info.coll {
+				_ = RegisterFontCollection(info.name, data)
+			} else {
+				_ = RegisterFont(info.name, data)
+			}
 		}
 	}
 }
@@ -760,22 +832,54 @@ func (c *IconCursor) compileText() error {
 			prevFont = fontObj
 		}
 
-		for _, r := range frag.text {
-			idx, err := fontObj.GlyphIndex(&fontBuf, r)
-			if err != nil {
-				idx = 0
+		runes := []rune(frag.text)
+		for i := 0; i < len(runes); i++ {
+			r := runes[i]
+			fontObjToUse := fontObj
+			var idx sfnt.GlyphIndex
+			var err error
+
+			isFlag := false
+			if i+1 < len(runes) && r >= 0x1F1E6 && r <= 0x1F1FF && runes[i+1] >= 0x1F1E6 && runes[i+1] <= 0x1F1FF {
+				code := string(rune(r-0x1F1E6+'A')) + string(rune(runes[i+1]-0x1F1E6+'A'))
+				fontRegistryMu.RLock()
+				emojiFont := fontRegistry["emoji"]
+				fontRegistryMu.RUnlock()
+				if emojiFont != nil && isAppleColorEmoji(emojiFont, &fontBuf) {
+					if gIdx, ok := emojiFlagGlyphs[code]; ok {
+						fontObjToUse = emojiFont
+						idx = sfnt.GlyphIndex(gIdx)
+						isFlag = true
+						i++
+					}
+				}
+			}
+
+			if !isFlag {
+				idx, err = fontObjToUse.GlyphIndex(&fontBuf, r)
+				if err != nil || idx == 0 {
+					if f, fallbackIdx := resolveFallbackGlyph(r); f != nil {
+						fontObjToUse = f
+						idx = fallbackIdx
+					}
+				}
+			}
+
+			if fontObjToUse != prevFont {
+				prevIdx = 0
+				prevFont = fontObjToUse
 			}
 
 			// Kerning
 			if prevIdx != 0 && idx != 0 {
-				kern, err := fontObj.Kern(&fontBuf, prevIdx, idx, ppem, font.HintingNone)
+				kern, err := fontObjToUse.Kern(&fontBuf, prevIdx, idx, ppem, font.HintingNone)
 				if err == nil {
 					penX += float64(kern) / 64
 				}
 			}
 
 			if idx != 0 {
-				adv, err := fontObj.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
+				adv, err := fontObjToUse.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
 				if err == nil {
 					penX += float64(adv) / 64
 				}
@@ -824,22 +928,84 @@ func (c *IconCursor) compileText() error {
 
 		var fragPath rasterx.Path
 
-		for _, r := range frag.text {
-			idx, err := fontObj.GlyphIndex(&fontBuf, r)
-			if err != nil {
-				idx = 0
+		runes := []rune(frag.text)
+		for i := 0; i < len(runes); i++ {
+			r := runes[i]
+			fontObjToUse := fontObj
+			var idx sfnt.GlyphIndex
+			var err error
+
+			isFlag := false
+			if i+1 < len(runes) && r >= 0x1F1E6 && r <= 0x1F1FF && runes[i+1] >= 0x1F1E6 && runes[i+1] <= 0x1F1FF {
+				code := string(rune(r-0x1F1E6+'A')) + string(rune(runes[i+1]-0x1F1E6+'A'))
+				fontRegistryMu.RLock()
+				emojiFont := fontRegistry["emoji"]
+				fontRegistryMu.RUnlock()
+				if emojiFont != nil && isAppleColorEmoji(emojiFont, &fontBuf) {
+					if gIdx, ok := emojiFlagGlyphs[code]; ok {
+						fontObjToUse = emojiFont
+						idx = sfnt.GlyphIndex(gIdx)
+						isFlag = true
+						i++
+					}
+				}
+			}
+
+			if !isFlag {
+				idx, err = fontObjToUse.GlyphIndex(&fontBuf, r)
+				if err != nil || idx == 0 {
+					if f, fallbackIdx := resolveFallbackGlyph(r); f != nil {
+						fontObjToUse = f
+						idx = fallbackIdx
+					}
+				}
+			}
+
+			if fontObjToUse != prevFont {
+				prevIdx = 0
+				prevFont = fontObjToUse
 			}
 
 			// Kerning
 			if prevIdx != 0 && idx != 0 {
-				kern, err := fontObj.Kern(&fontBuf, prevIdx, idx, ppem, font.HintingNone)
+				kern, err := fontObjToUse.Kern(&fontBuf, prevIdx, idx, ppem, font.HintingNone)
 				if err == nil {
 					penX += float64(kern) / 64
 				}
 			}
 
 			if idx != 0 {
-				segs, err := fontObj.LoadGlyph(&fontBuf, idx, ppem, nil)
+				// Try drawing as bitmap/PNG first
+				bytesData, index := findFontBytesAndIndex(fontObjToUse)
+				var pngBytes []byte
+				var originX, originY, maxPPEM int
+				var parseErr error
+				if bytesData != nil {
+					pngBytes, originX, originY, maxPPEM, parseErr = parseSBIX(bytesData, index, int(idx))
+				}
+				if pngBytes != nil && parseErr == nil {
+					if img, decodeErr := png.Decode(bytes.NewReader(pngBytes)); decodeErr == nil {
+						scale := frag.style.FontSize / float64(maxPPEM)
+						tx := penX + float64(originX)*scale
+						ty := penY - (float64(originY)+float64(img.Bounds().Dy()))*scale
+						svgi := SvgImage{
+							Image:     img,
+							Transform: frag.style.mAdder.M.Translate(tx, ty).Scale(scale, scale),
+							Opacity:   frag.style.FillOpacity,
+						}
+						c.icon.SVGImages = append(c.icon.SVGImages, svgi)
+
+						// Advance penX
+						adv, err := fontObjToUse.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
+						if err == nil {
+							penX += float64(adv) / 64
+						}
+						prevIdx = idx
+						continue // Skip vector path drawing!
+					}
+				}
+
+				segs, err := fontObjToUse.LoadGlyph(&fontBuf, idx, ppem, nil)
 				if err == nil {
 					fixedPenX := fixed.Int26_6(penX * 64)
 					fixedPenY := fixed.Int26_6(penY * 64)
@@ -872,7 +1038,7 @@ func (c *IconCursor) compileText() error {
 					}
 				}
 
-				adv, err := fontObj.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
+				adv, err := fontObjToUse.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
 				if err == nil {
 					penX += float64(adv) / 64
 				}
