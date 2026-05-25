@@ -6,7 +6,7 @@ import (
 	"image"
 	"testing"
 
-	. "github.com/srwiley/oksvg"
+	. "github.com/NimbleMarkets/oksvg"
 	. "github.com/srwiley/rasterx"
 	// . "github.com/srwiley/scanFT"
 )

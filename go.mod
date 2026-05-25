@@ -1,4 +1,6 @@
-module github.com/srwiley/oksvg
+module github.com/NimbleMarkets/oksvg
+
+// fork of upstream github.com/srwiley/oksvg
 
 go 1.25.0
 

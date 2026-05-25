@@ -1,4 +1,7 @@
 # oksvg
+
+This is a fork that points the Go module to `github.com/NimbleMarkets/oksvg` while we develop it in the NimbleMarkets ecosystem.
+
 oksvg is a rasterizer for a partial implementation of the SVG2.0 specification in golang.
 
 Although many SVG elements will not be read by oksvg, it is good enough to faithfully produce thousands, but certainly not all, SVG icons available both for free and commercially. A list of valid and invalid elements is in the doc folder.
