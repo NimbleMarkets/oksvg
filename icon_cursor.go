@@ -12,11 +12,14 @@ import (
 	"image/color"
 	"log"
 	"math"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/srwiley/rasterx"
 	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
@@ -54,11 +57,45 @@ func RegisterFont(family string, fontBytes []byte) error {
 	return nil
 }
 
-func lookupFont(family string) *sfnt.Font {
+func isBold(weight string) bool {
+	weight = strings.ToLower(strings.TrimSpace(weight))
+	if weight == "bold" || weight == "bolder" {
+		return true
+	}
+	if val, err := strconv.Atoi(weight); err == nil && val >= 600 {
+		return true
+	}
+	return false
+}
+
+func lookupFont(family, weight string) *sfnt.Font {
 	fontRegistryMu.RLock()
 	defer fontRegistryMu.RUnlock()
-	if f, ok := fontRegistry[family]; ok {
-		return f
+
+	// Parse fallback list, e.g. "'Arial Black', 'Impact', sans-serif"
+	families := strings.Split(family, ",")
+	for _, fam := range families {
+		fam = strings.TrimSpace(fam)
+		fam = strings.Trim(fam, `'"`) // Remove quotes
+		fam = strings.ToLower(fam)
+		if fam == "" {
+			continue
+		}
+
+		if isBold(weight) {
+			if f, ok := fontRegistry[fam+"-bold"]; ok {
+				return f
+			}
+		}
+		if f, ok := fontRegistry[fam]; ok {
+			return f
+		}
+	}
+
+	if isBold(weight) {
+		if f, ok := fontRegistry["default-bold"]; ok {
+			return f
+		}
 	}
 	return fontRegistry["default"]
 }
@@ -72,6 +109,49 @@ func init() {
 		fontRegistry["serif"] = f
 		fontRegistry["monospace"] = f
 		fontRegistryMu.Unlock()
+	}
+	fb, errb := sfnt.Parse(gobold.TTF)
+	if errb == nil {
+		fontRegistryMu.Lock()
+		fontRegistry["sans-serif-bold"] = fb
+		fontRegistry["default-bold"] = fb
+		fontRegistry["serif-bold"] = fb
+		fontRegistry["monospace-bold"] = fb
+		fontRegistryMu.Unlock()
+	}
+
+	// Try loading some common system fonts
+	for _, info := range []struct {
+		name string
+		path string
+	}{
+		// macOS
+		{"arial", "/System/Library/Fonts/Supplemental/Arial.ttf"},
+		{"arial-bold", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"},
+		{"arial black", "/System/Library/Fonts/Supplemental/Arial Black.ttf"},
+		{"arial black-bold", "/System/Library/Fonts/Supplemental/Arial Black.ttf"},
+		{"impact", "/System/Library/Fonts/Supplemental/Impact.ttf"},
+		{"impact-bold", "/System/Library/Fonts/Supplemental/Impact.ttf"},
+
+		// Windows
+		{"arial", "C:\\Windows\\Fonts\\arial.ttf"},
+		{"arial-bold", "C:\\Windows\\Fonts\\arialbd.ttf"},
+		{"arial black", "C:\\Windows\\Fonts\\ariblk.ttf"},
+		{"arial black-bold", "C:\\Windows\\Fonts\\ariblk.ttf"},
+		{"impact", "C:\\Windows\\Fonts\\impact.ttf"},
+		{"impact-bold", "C:\\Windows\\Fonts\\impact.ttf"},
+
+		// Linux (msttcorefonts)
+		{"arial", "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"},
+		{"arial-bold", "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf"},
+		{"arial black", "/usr/share/fonts/truetype/msttcorefonts/Arial_Black.ttf"},
+		{"arial black-bold", "/usr/share/fonts/truetype/msttcorefonts/Arial_Black.ttf"},
+		{"impact", "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"},
+		{"impact-bold", "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"},
+	} {
+		if data, err := os.ReadFile(info.path); err == nil {
+			_ = RegisterFont(info.name, data)
+		}
 	}
 }
 
@@ -202,7 +282,7 @@ func (c *IconCursor) readTransformAttr(m1 rasterx.Matrix2D, k string) (rasterx.M
 		}
 	case "scale":
 		if ln == 1 {
-			m1 = m1.Scale(c.points[0], 0)
+			m1 = m1.Scale(c.points[0], c.points[0])
 		} else if ln == 2 {
 			m1 = m1.Scale(c.points[0], c.points[1])
 		} else {
@@ -410,6 +490,8 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 		curStyle.FontSize = val
 	case "text-anchor":
 		curStyle.TextAnchor = v
+	case "font-weight":
+		curStyle.FontWeight = v
 	}
 	return nil
 }
@@ -657,7 +739,7 @@ func (c *IconCursor) compileText() error {
 	penX = startX
 
 	for _, frag := range c.textFragments {
-		fontObj := lookupFont(strings.ToLower(frag.style.FontFamily))
+		fontObj := lookupFont(frag.style.FontFamily, frag.style.FontWeight)
 		if fontObj == nil {
 			continue
 		}
@@ -719,7 +801,7 @@ func (c *IconCursor) compileText() error {
 	prevFont = nil
 
 	for _, frag := range c.textFragments {
-		fontObj := lookupFont(strings.ToLower(frag.style.FontFamily))
+		fontObj := lookupFont(frag.style.FontFamily, frag.style.FontWeight)
 		if fontObj == nil {
 			continue
 		}

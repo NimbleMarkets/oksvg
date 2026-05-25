@@ -26,6 +26,7 @@ type PathStyle struct {
 	FontFamily                        string
 	FontSize                          float64
 	TextAnchor                        string
+	FontWeight                        string
 }
 
 // styleAttribute describes draw options, such as {"fill":"black"; "stroke":"white"}.
@@ -36,4 +37,5 @@ type styleAttribute = map[string]string
 var DefaultStyle = PathStyle{1.0, 1.0, 2.0, 0.0, 4.0, nil, true,
 	color.NRGBA{0x00, 0x00, 0x00, 0xff}, nil,
 	nil, nil, rasterx.ButtCap, rasterx.Bevel, rasterx.MatrixAdder{M: rasterx.Identity},
-	"sans-serif", 12.0, "start"}
+	"sans-serif", 12.0, "start", "normal"}
+
