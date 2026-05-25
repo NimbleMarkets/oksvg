@@ -31,6 +31,11 @@ import (
 // arithmetic can't overflow from attacker-controlled SVG.
 const maxFontSize = 1000.0
 
+const (
+	regionalIndicatorBase = 0x1F1E6 // '🇦' (Regional Indicator Symbol Letter A)
+	regionalIndicatorEnd  = 0x1F1FF // '🇿' (Regional Indicator Symbol Letter Z)
+)
+
 // textFragment holds a piece of text with its associated style and coordinates.
 type textFragment struct {
 	text       string
@@ -799,8 +804,8 @@ func (c *IconCursor) compileText() error {
 			var err error
 
 			isFlag := false
-			if i+1 < len(runes) && r >= 0x1F1E6 && r <= 0x1F1FF && runes[i+1] >= 0x1F1E6 && runes[i+1] <= 0x1F1FF {
-				code := string(rune(r-0x1F1E6+'A')) + string(rune(runes[i+1]-0x1F1E6+'A'))
+			if i+1 < len(runes) && r >= regionalIndicatorBase && r <= regionalIndicatorEnd && runes[i+1] >= regionalIndicatorBase && runes[i+1] <= regionalIndicatorEnd {
+				code := string(rune(r-regionalIndicatorBase+'A')) + string(rune(runes[i+1]-regionalIndicatorBase+'A'))
 				fontRegistryMu.RLock()
 				emojiFont := fontRegistry["emoji"]
 				fontRegistryMu.RUnlock()
@@ -895,8 +900,8 @@ func (c *IconCursor) compileText() error {
 			var err error
 
 			isFlag := false
-			if i+1 < len(runes) && r >= 0x1F1E6 && r <= 0x1F1FF && runes[i+1] >= 0x1F1E6 && runes[i+1] <= 0x1F1FF {
-				code := string(rune(r-0x1F1E6+'A')) + string(rune(runes[i+1]-0x1F1E6+'A'))
+			if i+1 < len(runes) && r >= regionalIndicatorBase && r <= regionalIndicatorEnd && runes[i+1] >= regionalIndicatorBase && runes[i+1] <= regionalIndicatorEnd {
+				code := string(rune(r-regionalIndicatorBase+'A')) + string(rune(runes[i+1]-regionalIndicatorBase+'A'))
 				fontRegistryMu.RLock()
 				emojiFont := fontRegistry["emoji"]
 				fontRegistryMu.RUnlock()
