@@ -24,30 +24,38 @@ No:
 
 Presentation attributes
 Yes:
- ‘opacity’, ‘fill’, ‘stroke’, ‘fill-opacity’, ‘fill-rule’,  ‘opacity’,  ‘stroke-dasharray’, ‘stroke-dashoffset’, ‘stroke-linecap’, ‘stroke-linejoin’,  ‘stroke-opacity’, ‘stroke-width’,
+ ‘opacity’, ‘fill’, ‘stroke’, ‘fill-opacity’, ‘fill-rule’,  ‘opacity’,  ‘stroke-dasharray’, ‘stroke-dashoffset’, ‘stroke-linecap’, ‘stroke-linejoin’,  ‘stroke-opacity’, ‘stroke-width’, ‘stroke-miterlimit’, ‘font-family’, ‘font-size’, ‘font-weight’, ‘text-anchor’
 
 Yes: 'color' : all HTML4 names, and formats
 
-'style': Only listed presentation attributes
+'style': Only listed presentation attributes; a style="..." attribute wins over a
+presentation attribute of the same name.
 
 Yes:
 gradient elements: ‘linearGradient’ and ‘radialGradient’.
 
+Yes:
+pattern elements : ‘pattern’ (patternUnits/patternContentUnits of userSpaceOnUse or
+objectBoundingBox, patternTransform, forward-referenced url() fill/stroke)
+
+Yes:
+text elements: ‘text’, ‘tspan’ (font-family with fallback lists, font-size in px/pt/em/rem/%,
+font-weight, per-chunk text-anchor, dx/dy, kerning; x/y/dx/dy accept a single value, not a
+per-character list)
+
 No:
 
- — ‘alignment-baseline’, ‘baseline-shift’, ‘clip’, ‘clip-path’, ‘clip-rule’, ‘color-interpolation’, ‘color-interpolation-filters’, ‘color-profile’, ‘color-rendering’, ‘cursor’, ‘direction’, ‘display’, ‘dominant-baseline’, ‘enable-background’, ‘filter’, ‘flood-color’, ‘flood-opacity’, ‘font-family’, ‘font-size’, ‘font-size-adjust’, ‘font-stretch’, ‘font-style’, ‘font-variant’, ‘font-weight’, ‘glyph-orientation-horizontal’, ‘glyph-orientation-vertical’, ‘image-rendering’, ‘kerning’, ‘letter-spacing’, ‘lighting-color’, ‘marker-end’, ‘marker-mid’, ‘marker-start’, ‘mask’,‘overflow’, ‘pointer-events’, ‘shape-rendering’, ‘stop-color’, ‘stop-opacity’, ‘stroke-miterlimit’,  ‘text-anchor’, ‘text-decoration’, ‘text-rendering’, ‘unicode-bidi’, ‘visibility’, ‘word-spacing’, ‘writing-mode’
+ — ‘alignment-baseline’, ‘baseline-shift’, ‘clip’, ‘clip-path’, ‘clip-rule’, ‘color-interpolation’, ‘color-interpolation-filters’, ‘color-profile’, ‘color-rendering’, ‘cursor’, ‘direction’, ‘display’, ‘dominant-baseline’, ‘enable-background’, ‘filter’, ‘flood-color’, ‘flood-opacity’, ‘font-size-adjust’, ‘font-stretch’, ‘font-style’, ‘font-variant’, ‘glyph-orientation-horizontal’, ‘glyph-orientation-vertical’, ‘image-rendering’, ‘letter-spacing’, ‘lighting-color’, ‘marker-end’, ‘marker-mid’, ‘marker-start’, ‘mask’,‘overflow’, ‘pointer-events’, ‘shape-rendering’, ‘stop-color’, ‘stop-opacity’, ‘text-decoration’, ‘text-rendering’, ‘unicode-bidi’, ‘visibility’, ‘word-spacing’, ‘writing-mode’
 
 
-No: 
+No:
 
 common attributes : ‘id’, ‘xml:base’, ‘xml:lang’, ‘xml:space’
 
 conditional processing attributes — ‘requiredFeatures’, ‘requiredExtensions’, ‘systemLanguage’
 
-graphical event attributes — ‘onfocusin’, ‘onfocusout’, ‘onactivate’, ‘onclick’, ‘onmousedown’, ‘onmouseup’, ‘onmouseover’, ‘onmousemove’, ‘onmouseout’, ‘onload’; 
+graphical event attributes — ‘onfocusin’, ‘onfocusout’, ‘onactivate’, ‘onclick’, ‘onmousedown’, ‘onmouseup’, ‘onmouseover’, ‘onmousemove’, ‘onmouseout’, ‘onload’;
 
-
-pattern elements : 'pattern'
 
 ‘a’
 ‘altGlyph’
@@ -102,17 +110,14 @@ pattern elements : 'pattern'
 ‘mask’
 ‘missing-glyph’
 ‘mpath’
-‘pattern’
 ‘radialGradient’
 ‘script’
 ‘set’
 ‘stop’
 ‘switch’
 ‘symbol’
-‘text’
 ‘textPath’
 ‘tref’
-‘tspan’
 ‘use’
 ‘view’
 ‘vkern’
