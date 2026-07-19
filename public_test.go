@@ -11,12 +11,20 @@ import (
 	// . "github.com/srwiley/scanFT"
 )
 
-func ReadIconSet(folder string, paths []string) (icons []*SvgIcon) {
+// ReadIconSet reads every named icon from folder, failing tb immediately with
+// a clear message identifying the file if any read errors out. Previously a
+// failed read was silently dropped, which let benchmarks quietly run against
+// a shorter icon list (or panic on beachIcons[0] if the very first file
+// failed to load) instead of reporting the real problem.
+func ReadIconSet(tb testing.TB, folder string, paths []string) (icons []*SvgIcon) {
+	tb.Helper()
 	for _, p := range paths {
-		icon, errSvg := ReadIcon(folder+p+".svg", IgnoreErrorMode)
-		if errSvg == nil {
-			icons = append(icons, icon)
+		file := folder + p + ".svg"
+		icon, errSvg := ReadIcon(file, IgnoreErrorMode)
+		if errSvg != nil {
+			tb.Fatalf("ReadIconSet: failed to read %q: %v", file, errSvg)
 		}
+		icons = append(icons, icon)
 	}
 	return
 }
@@ -26,7 +34,7 @@ func BenchmarkLandscapeIcons(b *testing.B) {
 		beachIconNames = []string{
 			"beach", "cape", "iceberg", "island",
 			"mountains", "sea", "trees", "village"}
-		beachIcons = ReadIconSet("testdata/landscapeIcons/", beachIconNames)
+		beachIcons = ReadIconSet(b, "testdata/landscapeIcons/", beachIconNames)
 		w, h       = int(beachIcons[0].ViewBox.W), int(beachIcons[0].ViewBox.H)
 		img        = image.NewRGBA(image.Rect(0, 0, w, h))
 		//source     = image.NewUniform(color.NRGBA{0, 0, 0, 255})
@@ -63,7 +71,7 @@ func BenchmarkSportsIcons(b *testing.B) {
 			"cycling_track", "water_polo",
 			"diving", "rhythmic_gymnastics", "weightlifting",
 			"equestrian", "rowing", "wrestling"}
-		sportsIcons = ReadIconSet("testdata/sportsIcons/", sportsIconNames)
+		sportsIcons = ReadIconSet(b, "testdata/sportsIcons/", sportsIconNames)
 		w2, h2      = int(sportsIcons[0].ViewBox.W), int(sportsIcons[0].ViewBox.H)
 		img2        = image.NewRGBA(image.Rect(0, 0, w2, h2))
 		scannerGV2  = NewScannerGV(w2, h2, img2, image.Rect(0, 0, w2, h2))

@@ -8,6 +8,7 @@ package oksvg
 import (
 	"errors"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 
@@ -19,19 +20,45 @@ import (
 // of the svg element.
 var unitSuffixes = []string{"cm", "mm", "px", "pt"}
 
+// errEmptyColorValue is returned by parseColorValue when given an empty (or
+// all-whitespace) color component, such as the middle component of the
+// malformed input "rgb(1,,1)".
+var errEmptyColorValue = errors.New("parseColorValue: empty color value")
+
+// parseColorValue parses a single rgb() color component, which may be a
+// bare (possibly signed, possibly fractional) number or a percentage. The
+// result is rounded to the nearest integer and clamped to [0,255]; it never
+// panics, even on malformed or empty input.
 func parseColorValue(v string) (uint8, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, errEmptyColorValue
+	}
 	if v[len(v)-1] == '%' {
-		n, err := strconv.Atoi(strings.TrimSpace(v[:len(v)-1]))
+		n, err := strconv.ParseFloat(strings.TrimSpace(v[:len(v)-1]), 64)
 		if err != nil {
 			return 0, err
 		}
-		return uint8(n * 0xFF / 100), nil
+		return clampColorValue(n * 255 / 100), nil
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(v))
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, err
+	}
+	return clampColorValue(n), nil
+}
+
+// clampColorValue rounds n to the nearest integer and clamps it to the
+// [0,255] range of a color.NRGBA channel.
+func clampColorValue(n float64) uint8 {
+	n = math.Round(n)
+	if n < 0 {
+		return 0
+	}
 	if n > 255 {
-		n = 255
+		return 255
 	}
-	return uint8(n), err
+	return uint8(n)
 }
 
 // trimSuffixes removes unitSuffixes from any number that is not just numeric
@@ -52,11 +79,12 @@ func parseFloat(s string, bitSize int) (float64, error) {
 	return strconv.ParseFloat(val, bitSize)
 }
 
-// splitOnCommaOrSpace returns a list of strings after splitting the input on comma and space delimiters
+// splitOnCommaOrSpace returns a list of strings after splitting the input on comma
+// and whitespace delimiters (space, tab, newline, carriage return)
 func splitOnCommaOrSpace(s string) []string {
 	return strings.FieldsFunc(s,
 		func(r rune) bool {
-			return r == ',' || r == ' '
+			return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
 		})
 }
 
@@ -69,10 +97,12 @@ func parseClasses(data string) (map[string]styleAttribute, error) {
 			continue
 		}
 		valueIndex := strings.Index(v, "{")
-		if valueIndex == -1 || valueIndex == len(v)-1 {
+		if valueIndex == -1 {
 			return res, errors.New(v + "}: invalid map format in class definitions")
 		}
 		classesStr := v[:valueIndex]
+		// An empty rule body (".a{}") is valid CSS: attrStr is "" and parseAttrs
+		// returns an empty map, so the selector simply contributes no properties.
 		attrStr := v[valueIndex+1:]
 		attrMap, err := parseAttrs(attrStr)
 		if err != nil {

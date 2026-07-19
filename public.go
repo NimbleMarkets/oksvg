@@ -1,7 +1,8 @@
 // Copyright 2017 The oksvg Authors. All rights reserved.
 // created: 2/12/2017 by S.R.Wiley
 //
-// utils.go implements translation of an SVG2.0 path into a rasterx Path.
+// public.go implements the public SVG-reading entry points and SVG color
+// parsing.
 
 package oksvg
 
@@ -11,7 +12,6 @@ import (
 	"fmt"
 	"image/color"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"strconv"
@@ -34,7 +34,6 @@ func ReadIconStream(stream io.Reader, errMode ...ErrorMode) (*SvgIcon, error) {
 	if len(errMode) > 0 {
 		cursor.ErrorMode = errMode[0]
 	}
-	classInfo := ""
 	decoder := xml.NewDecoder(stream)
 	decoder.CharsetReader = charset.NewReaderLabel
 	for {
@@ -62,76 +61,26 @@ func ReadIconStream(stream io.Reader, errMode ...ErrorMode) (*SvgIcon, error) {
 				cursor.inDefsStyle = true
 			}
 		case xml.EndElement:
-			// pop style
-			cursor.StyleStack = cursor.StyleStack[:len(cursor.StyleStack)-1]
-			switch se.Name.Local {
-			case "g":
-				if cursor.inDefs {
-					cursor.currentDef = append(cursor.currentDef, definition{
-						Tag: "endg",
-					})
-				}
-			case "pattern":
-				if cursor.inDefs {
-					cursor.currentDef = append(cursor.currentDef, definition{
-						Tag: "endpattern",
-					})
-				}
-			case "text":
-				cursor.inText = false
-				err = cursor.compileText()
-				if err != nil {
-					return icon, err
-				}
-			case "title":
-				cursor.inTitleText = false
-			case "desc":
-				cursor.inDescText = false
-			case "defs":
-				if len(cursor.currentDef) > 0 {
-					cursor.icon.Defs[cursor.currentDef[0].ID] = cursor.currentDef
-					cursor.currentDef = make([]definition, 0)
-				}
-				cursor.inDefs = false
-			case "radialGradient", "linearGradient":
-				cursor.inGrad = false
-
-			case "style":
-				if cursor.inDefsStyle {
-					icon.classes, err = parseClasses(classInfo)
-					if err != nil {
-						return icon, err
-					}
-					cursor.inDefsStyle = false
-				}
+			if err = cursor.readEndElement(se); err != nil {
+				return icon, err
 			}
 		case xml.CharData:
-			if cursor.inTitleText {
+			// Route character data exclusively so <title>/<desc> inside <text>
+			// win and never leak into the rendered text run.
+			switch {
+			case cursor.inTitleText:
 				icon.Titles[len(icon.Titles)-1] += string(se)
-			}
-			if cursor.inDescText {
+			case cursor.inDescText:
 				icon.Descriptions[len(icon.Descriptions)-1] += string(se)
-			}
-			if cursor.inDefsStyle {
-				classInfo = string(se)
-			}
-			if cursor.inText {
-				cursor.textFragments = append(cursor.textFragments, textFragment{
-					text:  string(se),
-					style: cursor.StyleStack[len(cursor.StyleStack)-1],
-					x:     cursor.textX,
-					y:     cursor.textY,
-					dx:    cursor.textDx,
-					dy:    cursor.textDy,
-					hasX:  cursor.hasTextX,
-					hasY:  cursor.hasTextY,
-				})
-				cursor.textDx = 0
-				cursor.textDy = 0
-				cursor.hasTextX = false
-				cursor.hasTextY = false
+			case cursor.inDefsStyle:
+				cursor.classInfo += string(se) // += so CDATA chunking is preserved
+			case cursor.inText:
+				cursor.appendTextChunk(se)
 			}
 		}
+	}
+	if err := cursor.finalize(); err != nil {
+		return icon, err
 	}
 	return icon, nil
 }
@@ -143,8 +92,8 @@ func ReadReplacingCurrentColor(stream io.Reader, currentColor string, errMode ..
 		data []byte
 	)
 
-	if data, err = ioutil.ReadAll(stream); err != nil {
-		return nil, fmt.Errorf("%w: read data: %v", errParamMismatch, err)
+	if data, err = io.ReadAll(stream); err != nil {
+		return nil, fmt.Errorf("read data: %w", err)
 	}
 
 	if currentColor != "" && strings.Contains(string(data), "currentColor") {
@@ -152,7 +101,7 @@ func ReadReplacingCurrentColor(stream io.Reader, currentColor string, errMode ..
 	}
 
 	if icon, err = ReadIconStream(bytes.NewBuffer(data), errMode...); err != nil {
-		return nil, fmt.Errorf("%w: load: %v", errParamMismatch, err)
+		return nil, fmt.Errorf("load: %w", err)
 	}
 
 	return icon, nil
@@ -172,7 +121,7 @@ func ReadIcon(iconFile string, errMode ...ErrorMode) (*SvgIcon, error) {
 	return ReadIconStream(fin, errMode...)
 }
 
-// ParseSVGColorNum reads the SFG color string e.g. #FBD9BD
+// ParseSVGColorNum reads the SVG color string e.g. #FBD9BD
 func ParseSVGColorNum(colorStr string) (r, g, b uint8, err error) {
 	colorStr = strings.TrimPrefix(colorStr, "#")
 	var t uint64
@@ -205,8 +154,7 @@ func ParseSVGColorNum(colorStr string) (r, g, b uint8, err error) {
 // ParseSVGColor parses an SVG color string in all forms
 // including all SVG1.1 names, obtained from the image.colornames package
 func ParseSVGColor(colorStr string) (color.Color, error) {
-	// _, _, _, a := curColor.RGBA()
-	v := strings.ToLower(colorStr)
+	v := strings.ToLower(strings.TrimSpace(colorStr))
 	if strings.HasPrefix(v, "url") { // We are not handling urls
 		// and gradients and stuff at this point
 		return color.NRGBA{0, 0, 0, 255}, nil
@@ -216,6 +164,8 @@ func ParseSVGColor(colorStr string) (color.Color, error) {
 		// nil signals that the function (fill or stroke) is off;
 		// not the same as black
 		return nil, nil
+	case "transparent":
+		return color.NRGBA{0, 0, 0, 0}, nil
 	default:
 		cn, ok := colornames.Map[v]
 		if ok {
@@ -223,93 +173,183 @@ func ParseSVGColor(colorStr string) (color.Color, error) {
 			return color.NRGBA{uint8(r), uint8(g), uint8(b), uint8(a)}, nil
 		}
 	}
-	cStr := strings.TrimPrefix(colorStr, "rgb(")
-	if cStr != colorStr {
-		cStr := strings.TrimSuffix(cStr, ")")
-		vals := strings.Split(cStr, ",")
+
+	if cStr := strings.TrimPrefix(v, "rgba("); cStr != v {
+		vals := strings.Split(strings.TrimSuffix(cStr, ")"), ",")
+		if len(vals) != 4 {
+			return color.NRGBA{}, errParamMismatch
+		}
+		var cvals [3]uint8
+		for i := 0; i < 3; i++ {
+			if strings.TrimSpace(vals[i]) == "" {
+				return nil, errParamMismatch
+			}
+			cv, err := parseColorValue(vals[i])
+			if err != nil {
+				return nil, err
+			}
+			cvals[i] = cv
+		}
+		a, err := parseAlphaValue(vals[3])
+		if err != nil {
+			return nil, err
+		}
+		return color.NRGBA{cvals[0], cvals[1], cvals[2], a}, nil
+	}
+
+	if cStr := strings.TrimPrefix(v, "rgb("); cStr != v {
+		vals := strings.Split(strings.TrimSuffix(cStr, ")"), ",")
 		if len(vals) != 3 {
 			return color.NRGBA{}, errParamMismatch
 		}
 		var cvals [3]uint8
-		var err error
 		for i := range cvals {
-			cvals[i], err = parseColorValue(vals[i])
+			// Guard against empty components (e.g. "rgb(1,,1)") before
+			// parseColorValue indexes them.
+			if strings.TrimSpace(vals[i]) == "" {
+				return nil, errParamMismatch
+			}
+			cv, err := parseColorValue(vals[i])
 			if err != nil {
 				return nil, err
 			}
+			cvals[i] = cv
 		}
 		return color.NRGBA{cvals[0], cvals[1], cvals[2], 0xFF}, nil
 	}
 
-	cStr = strings.TrimPrefix(colorStr, "hsl(")
-	if cStr != colorStr {
-		cStr := strings.TrimSuffix(cStr, ")")
-		vals := strings.Split(cStr, ",")
+	if cStr := strings.TrimPrefix(v, "hsla("); cStr != v {
+		vals := strings.Split(strings.TrimSuffix(cStr, ")"), ",")
+		if len(vals) != 4 {
+			return color.NRGBA{}, errParamMismatch
+		}
+		r, g, b, err := hslToNRGB(vals[0], vals[1], vals[2])
+		if err != nil {
+			return color.NRGBA{}, err
+		}
+		a, err := parseAlphaValue(vals[3])
+		if err != nil {
+			return nil, err
+		}
+		return color.NRGBA{r, g, b, a}, nil
+	}
+
+	if cStr := strings.TrimPrefix(v, "hsl("); cStr != v {
+		vals := strings.Split(strings.TrimSuffix(cStr, ")"), ",")
 		if len(vals) != 3 {
 			return color.NRGBA{}, errParamMismatch
 		}
-
-		H, err := strconv.ParseInt(strings.TrimSpace(vals[0]), 10, 64)
+		r, g, b, err := hslToNRGB(vals[0], vals[1], vals[2])
 		if err != nil {
-			return color.NRGBA{}, fmt.Errorf("invalid hue in hsl: '%s' (%s)", vals[0], err)
+			return color.NRGBA{}, err
 		}
-
-		S, err := strconv.ParseFloat(strings.TrimSpace(vals[1][:len(vals[1])-1]), 64)
-		if err != nil {
-			return color.NRGBA{}, fmt.Errorf("invalid saturation in hsl: '%s' (%s)", vals[1], err)
-		}
-		S = S / 100
-
-		L, err := strconv.ParseFloat(strings.TrimSpace(vals[2][:len(vals[2])-1]), 64)
-		if err != nil {
-			return color.NRGBA{}, fmt.Errorf("invalid lightness in hsl: '%s' (%s)", vals[2], err)
-		}
-		L = L / 100
-
-		C := (1 - math.Abs((2*L)-1)) * S
-		X := C * (1 - math.Abs(math.Mod((float64(H)/60), 2)-1))
-		m := L - C/2
-
-		var rp, gp, bp float64
-		if H < 60 {
-			rp, gp, bp = float64(C), float64(X), float64(0)
-		} else if H < 120 {
-			rp, gp, bp = float64(X), float64(C), float64(0)
-		} else if H < 180 {
-			rp, gp, bp = float64(0), float64(C), float64(X)
-		} else if H < 240 {
-			rp, gp, bp = float64(0), float64(X), float64(C)
-		} else if H < 300 {
-			rp, gp, bp = float64(X), float64(0), float64(C)
-		} else {
-			rp, gp, bp = float64(C), float64(0), float64(X)
-		}
-
-		r, g, b := math.Round((rp+m)*255), math.Round((gp+m)*255), math.Round((bp+m)*255)
-		if r > 255 {
-			r = 255
-		}
-		if g > 255 {
-			g = 255
-		}
-		if b > 255 {
-			b = 255
-		}
-
-		return color.NRGBA{
-			uint8(r),
-			uint8(g),
-			uint8(b),
-			0xFF,
-		}, nil
+		return color.NRGBA{r, g, b, 0xFF}, nil
 	}
 
-	if colorStr[0] == '#' {
-		r, g, b, err := ParseSVGColorNum(colorStr)
+	// Use the trimmed/lower-cased value (v), like every other branch above, so a
+	// hex color with surrounding whitespace (e.g. " #ff0000") still parses.
+	if len(v) > 0 && v[0] == '#' {
+		r, g, b, err := ParseSVGColorNum(v)
 		if err != nil {
 			return nil, err
 		}
 		return color.NRGBA{r, g, b, 0xFF}, nil
 	}
 	return nil, errParamMismatch
+}
+
+// hslToNRGB converts hsl() string components (hue, saturation%, lightness%) to
+// 8-bit RGB. The hue is parsed as a float and wrapped into [0,360); saturation
+// and lightness require a % suffix, validated before use so malformed input
+// (e.g. "hsl(1,,1)") errors instead of panicking.
+func hslToNRGB(hStr, sStr, lStr string) (r, g, b uint8, err error) {
+	Hf, err := strconv.ParseFloat(strings.TrimSpace(hStr), 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid hue in hsl: '%s' (%s)", hStr, err)
+	}
+	Hf = math.Mod(Hf, 360)
+	if Hf < 0 {
+		Hf += 360
+	}
+	S, err := parseHSLPercent(sStr)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid saturation in hsl: '%s' (%s)", sStr, err)
+	}
+	L, err := parseHSLPercent(lStr)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid lightness in hsl: '%s' (%s)", lStr, err)
+	}
+
+	C := (1 - math.Abs((2*L)-1)) * S
+	X := C * (1 - math.Abs(math.Mod(Hf/60, 2)-1))
+	m := L - C/2
+
+	var rp, gp, bp float64
+	switch {
+	case Hf < 60:
+		rp, gp, bp = C, X, 0
+	case Hf < 120:
+		rp, gp, bp = X, C, 0
+	case Hf < 180:
+		rp, gp, bp = 0, C, X
+	case Hf < 240:
+		rp, gp, bp = 0, X, C
+	case Hf < 300:
+		rp, gp, bp = X, 0, C
+	default:
+		rp, gp, bp = C, 0, X
+	}
+	return clamp255((rp + m) * 255), clamp255((gp + m) * 255), clamp255((bp + m) * 255), nil
+}
+
+// parseHSLPercent parses a required-percent hsl component, e.g. "47%" -> 0.47.
+func parseHSLPercent(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if !strings.HasSuffix(s, "%") {
+		return 0, fmt.Errorf("missing %% suffix in %q", s)
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(s, "%")), 64)
+	if err != nil {
+		return 0, err
+	}
+	return f / 100, nil
+}
+
+// parseAlphaValue parses an alpha channel expressed as a float in [0,1] or a
+// percentage, clamped and scaled to an 8-bit value.
+func parseAlphaValue(v string) (uint8, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, errParamMismatch
+	}
+	var f float64
+	var err error
+	if strings.HasSuffix(v, "%") {
+		f, err = strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(v, "%")), 64)
+		f /= 100
+	} else {
+		f, err = strconv.ParseFloat(v, 64)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	return uint8(math.Round(f * 255)), nil
+}
+
+// clamp255 rounds and clamps a float channel value to the [0,255] uint8 range.
+func clamp255(f float64) uint8 {
+	f = math.Round(f)
+	if f < 0 {
+		f = 0
+	}
+	if f > 255 {
+		f = 255
+	}
+	return uint8(f)
 }

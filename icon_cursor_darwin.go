@@ -1,5 +1,9 @@
 //go:build darwin
 
+// icon_cursor_darwin.go lists the macOS system/emoji font locations and holds
+// the Apple Color Emoji regional-indicator (flag) ligature glyph table, plus the
+// version gate that protects that table against font updates.
+
 package oksvg
 
 import (
@@ -8,10 +12,7 @@ import (
 	"golang.org/x/image/font/sfnt"
 )
 
-var systemFonts = []struct {
-	name string
-	path string
-}{
+var systemFonts = []systemFontInfo{
 	{"arial", "/System/Library/Fonts/Supplemental/Arial.ttf"},
 	{"arial-bold", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"},
 	{"arial black", "/System/Library/Fonts/Supplemental/Arial Black.ttf"},
@@ -20,15 +21,30 @@ var systemFonts = []struct {
 	{"impact-bold", "/System/Library/Fonts/Supplemental/Impact.ttf"},
 }
 
-var emojiFonts = []struct {
-	name string
-	path string
-	coll bool
-}{
+var emojiFonts = []emojiFontInfo{
 	{"emoji", "/System/Library/Fonts/Apple Color Emoji.ttc", true},
 	{"symbols", "/System/Library/Fonts/Apple Symbols.ttf", false},
 }
 
+// appleColorEmojiVersion is the font version (name ID 5, "version" string) that
+// the emojiFlagGlyphs table below was extracted for. The table maps two-letter
+// region codes to raw glyph indices inside "Apple Color Emoji"; those indices
+// are specific to one build of the font and are silently invalidated when Apple
+// ships a new one.
+//
+// Provenance: extracted from Apple Color Emoji face 0, name ID 5 == "21.4d3e1"
+// (macOS 26.5.2, build 25F84, captured 2026-07-18). resolveFlagGlyph requires
+// the installed font to report this exact version before using the table; on any
+// mismatch it disables the flag ligatures and each regional-indicator rune is
+// rendered individually through the normal fallback path instead (correct, just
+// without the combined flag glyph).
+const appleColorEmojiVersion = "21.4d3e1"
+
+// resolveFlagGlyph maps a two-uppercase-ASCII-letter region code (e.g. "US") to
+// the combined flag glyph in the Apple Color Emoji font, reporting ok=false when
+// the pair is not a known flag or the installed font is not the exact version the
+// table was built for. buf is a scratch sfnt.Buffer supplied by the caller and
+// may be reused across calls.
 func resolveFlagGlyph(code string, emojiFont *sfnt.Font, buf *sfnt.Buffer) (sfnt.GlyphIndex, bool) {
 	if emojiFont != nil && isAppleColorEmoji(emojiFont, buf) {
 		if gIdx, ok := emojiFlagGlyphs[code]; ok {
@@ -38,9 +54,17 @@ func resolveFlagGlyph(code string, emojiFont *sfnt.Font, buf *sfnt.Buffer) (sfnt
 	return 0, false
 }
 
+// isAppleColorEmoji reports whether f is the exact Apple Color Emoji build the
+// emojiFlagGlyphs table was extracted from: both the family name (name ID 1) and
+// the version string (name ID 5) must match, so a font update can't silently
+// point the raw glyph indices at the wrong glyphs.
 func isAppleColorEmoji(f *sfnt.Font, buf *sfnt.Buffer) bool {
 	name, err := f.Name(buf, sfnt.NameID(1))
-	return err == nil && strings.Contains(name, "Apple Color Emoji")
+	if err != nil || !strings.Contains(name, "Apple Color Emoji") {
+		return false
+	}
+	version, err := f.Name(buf, sfnt.NameID(5))
+	return err == nil && version == appleColorEmojiVersion
 }
 
 var emojiFlagGlyphs = map[string]int{

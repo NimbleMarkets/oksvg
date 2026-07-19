@@ -17,6 +17,13 @@ import (
 // unbounded image.NewRGBA allocation.
 const maxPatternTileDim = 4096
 
+// ObjectBounds is the axis-aligned bounding box of the object being painted,
+// expressed in user space (pre-transform). It positions objectBoundingBox
+// gradients and patterns.
+type ObjectBounds struct {
+	X, Y, W, H float64
+}
+
 // Pattern holds the data of an SVG pattern element.
 type Pattern struct {
 	ID                  string
@@ -25,22 +32,34 @@ type Pattern struct {
 	ContentUnits        string // "userSpaceOnUse" or "objectBoundingBox"
 	Transform           rasterx.Matrix2D
 	Paths               []SvgPath
-	// rendering guards against infinite recursion when a pattern's children
-	// reference the same pattern (the parse-time fix in compilePattern caches
-	// the in-progress pointer so children resolve to it; this flag stops the
-	// draw-time recursion that would otherwise happen).
-	rendering bool
 }
 
-// GetColorFunction returns a ColorFunc that implements the tiling logic for this pattern.
-func (p *Pattern) GetColorFunction(opacity float64, objBounds struct{ X, Y, W, H float64 }, parentTransform rasterx.Matrix2D) rasterx.ColorFunc {
-	if p.rendering {
-		return func(xi, yi int) color.Color {
-			return color.Transparent
-		}
+// GetColorFunction returns a ColorFunc that implements the tiling logic for
+// this pattern. objBounds is the user-space bounding box of the painted object
+// and parentTransform is the accumulated draw transform (user space -> device).
+func (p *Pattern) GetColorFunction(opacity float64, objBounds ObjectBounds, parentTransform rasterx.Matrix2D) rasterx.ColorFunc {
+	return p.getColorFunction(opacity, objBounds, parentTransform, map[*Pattern]bool{})
+}
+
+// getColorFunction is the recursion-aware implementation of GetColorFunction.
+// active is the set of patterns currently being rasterized on the call graph;
+// re-entering a pattern that is already active is a cycle and paints
+// transparent. This replaces the old shared `rendering bool` flag, which was a
+// data race under concurrent draws and produced blank tiles.
+func (p *Pattern) getColorFunction(opacity float64, objBounds ObjectBounds, parentTransform rasterx.Matrix2D, active map[*Pattern]bool) rasterx.ColorFunc {
+	transparent := func(xi, yi int) color.Color { return color.Transparent }
+
+	if active == nil {
+		active = map[*Pattern]bool{}
 	}
-	p.rendering = true
-	defer func() { p.rendering = false }()
+	if active[p] {
+		return transparent
+	}
+	active[p] = true
+	// Remove p from the active set once its tile is rasterized so that a
+	// sibling (non-cyclic) reference to the same pattern can still render.
+	defer delete(active, p)
+
 	var x, y, w, h float64
 	if p.Units == "objectBoundingBox" {
 		x = objBounds.X + objBounds.W*p.X
@@ -55,9 +74,7 @@ func (p *Pattern) GetColorFunction(opacity float64, objBounds struct{ X, Y, W, H
 	}
 
 	if w <= 0 || h <= 0 {
-		return func(xi, yi int) color.Color {
-			return color.Transparent
-		}
+		return transparent
 	}
 
 	// Compute combined scale factor to render pattern at target resolution
@@ -101,18 +118,17 @@ func (p *Pattern) GetColorFunction(opacity float64, objBounds struct{ X, Y, W, H
 		contentTransform = rasterx.Identity.Scale(scaleX, scaleY)
 	}
 
-	// Draw pattern sub-paths onto tile image
-	for _, path := range p.Paths {
-		path.DrawTransformed(dasher, opacity, contentTransform)
+	// Draw pattern sub-paths onto tile image. Route through the internal draw
+	// so nested *Pattern fills share the active set and cycles are caught.
+	for i := range p.Paths {
+		p.Paths[i].drawTransformedInternal(dasher, opacity, contentTransform, active)
 	}
 
 	// Guard against singular combined transforms (det == 0). Invert would
 	// otherwise produce Inf/NaN entries and corrupt the tile lookup.
 	det := combinedTransform.A*combinedTransform.D - combinedTransform.B*combinedTransform.C
 	if math.Abs(det) < 1e-12 {
-		return func(xi, yi int) color.Color {
-			return color.Transparent
-		}
+		return transparent
 	}
 	invCombined := combinedTransform.Invert()
 

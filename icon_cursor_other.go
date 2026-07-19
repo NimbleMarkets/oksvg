@@ -1,20 +1,11 @@
 //go:build !darwin && !windows && !linux
 
+// icon_cursor_other.go supplies empty system/emoji font tables for platforms
+// without a known set of font locations (e.g. js/wasm). Flag-ligature resolution
+// is the shared no-op in icon_cursor_flags_stub.go.
+
 package oksvg
 
-import "golang.org/x/image/font/sfnt"
+var systemFonts = []systemFontInfo{}
 
-var systemFonts = []struct {
-	name string
-	path string
-}{}
-
-var emojiFonts = []struct {
-	name string
-	path string
-	coll bool
-}{}
-
-func resolveFlagGlyph(code string, emojiFont *sfnt.Font, buf *sfnt.Buffer) (sfnt.GlyphIndex, bool) {
-	return 0, false
-}
+var emojiFonts = []emojiFontInfo{}

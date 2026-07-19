@@ -1,7 +1,7 @@
 // Copyright 2017 The oksvg Authors. All rights reserved.
 // created: 2/12/2017 by S.R.Wiley
 //
-// utils.go implements translation of an SVG2.0 path into a rasterx Path.
+// svg_icon.go holds the parsed SVG (SvgIcon) and draws it to a target.
 
 package oksvg
 
@@ -24,24 +24,59 @@ type SvgIcon struct {
 	Transform    rasterx.Matrix2D
 	DrawTarget   draw.Image
 	classes      map[string]styleAttribute
+	drawOrder    int // monotonically increasing draw-order stamp source
 }
 
-// Draw the compiled SVG icon into the GraphicContext.
-// All elements should be contained by the Bounds rectangle of the SvgIcon.
+// nextOrder returns the next draw-order stamp and advances the counter. Vector
+// paths and bitmap images are stamped from this shared sequence so Draw can
+// interleave them in document order.
+func (s *SvgIcon) nextOrder() int {
+	o := s.drawOrder
+	s.drawOrder++
+	return o
+}
+
+// Draw rasterizes the icon. Vector shapes (SVGPaths) are painted into r, a
+// rasterx.Dasher. Bitmap glyphs (SVGImages, e.g. color emoji) are composited
+// into s.DrawTarget; if DrawTarget is nil they are skipped. Paths and images
+// are interleaved by their draw-order stamp so document z-order is preserved.
+// On equal or zero order, paths are drawn before images (legacy behavior).
 func (s *SvgIcon) Draw(r *rasterx.Dasher, opacity float64) {
-	for _, svgp := range s.SVGPaths {
-		svgp.DrawTransformed(r, opacity, s.Transform)
-	}
-	if s.DrawTarget != nil {
-		for _, svgi := range s.SVGImages {
-			svgi.DrawTransformed(s.DrawTarget, opacity, s.Transform)
+	pi, ii := 0, 0
+	for pi < len(s.SVGPaths) || ii < len(s.SVGImages) {
+		drawPath := false
+		switch {
+		case ii >= len(s.SVGImages):
+			drawPath = true
+		case pi >= len(s.SVGPaths):
+			drawPath = false
+		default:
+			// Paths first on equal/zero order (legacy behavior).
+			drawPath = s.SVGPaths[pi].order <= s.SVGImages[ii].order
+		}
+		if drawPath {
+			s.SVGPaths[pi].DrawTransformed(r, opacity, s.Transform)
+			pi++
+		} else {
+			if s.DrawTarget != nil {
+				s.SVGImages[ii].DrawTransformed(s.DrawTarget, opacity, s.Transform)
+			}
+			ii++
 		}
 	}
 }
 
-// SetTarget sets the Transform matrix to draw within the bounds of the rectangle arguments
+// SetTarget sets the Transform matrix to draw within the bounds of the
+// rectangle arguments, accounting for a non-zero viewBox origin. Zero viewBox
+// dimensions fall back to a scale of 1 on that axis to avoid Inf/NaN.
 func (s *SvgIcon) SetTarget(x, y, w, h float64) {
-	scaleW := w / s.ViewBox.W
-	scaleH := h / s.ViewBox.H
-	s.Transform = rasterx.Identity.Translate(x-s.ViewBox.X, y-s.ViewBox.Y).Scale(scaleW, scaleH)
+	scaleW := 1.0
+	if s.ViewBox.W != 0 {
+		scaleW = w / s.ViewBox.W
+	}
+	scaleH := 1.0
+	if s.ViewBox.H != 0 {
+		scaleH = h / s.ViewBox.H
+	}
+	s.Transform = rasterx.Identity.Translate(x, y).Scale(scaleW, scaleH).Translate(-s.ViewBox.X, -s.ViewBox.Y)
 }

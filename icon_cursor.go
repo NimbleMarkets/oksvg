@@ -1,7 +1,9 @@
 // Copyright 2017 The oksvg Authors. All rights reserved.
 // created: 2/12/2017 by S.R.Wiley
 //
-// utils.go implements translation of an SVG2.0 path into a rasterx Path.
+// icon_cursor.go implements the SVG parsing cursor: element and style handling,
+// the depth-aware <defs> collection model, color/gradient resolution, and text
+// layout.
 
 package oksvg
 
@@ -45,6 +47,19 @@ type textFragment struct {
 	hasX, hasY bool
 }
 
+// systemFontInfo names a single-face system font file to try to load. The
+// platform files (icon_cursor_{darwin,linux,windows,other}.go) declare the
+// per-GOOS systemFonts table using this type.
+type systemFontInfo struct{ name, path string }
+
+// emojiFontInfo names an emoji/symbol font file. coll marks a TrueType
+// collection (.ttc), which is registered with RegisterFontCollection instead of
+// RegisterFont. The platform files declare the per-GOOS emojiFonts table.
+type emojiFontInfo struct {
+	name, path string
+	coll       bool
+}
+
 // fontRegistry maps font-family names to parsed sfnt.Fonts. Protected by
 // fontRegistryMu so RegisterFont and SVG parsing can run concurrently.
 var (
@@ -53,6 +68,11 @@ var (
 	fontBytesRegistry = map[string][]byte{}
 	fontIndexRegistry = map[string]int{}
 )
+
+// systemFontsOnce guards loadSystemFonts so the (potentially large, e.g. the
+// ~180 MB Apple Color Emoji TTC on macOS) system/emoji font files are read from
+// disk at most once, and only when text is first laid out rather than at import.
+var systemFontsOnce sync.Once
 
 // RegisterFont registers a font under the given family name.
 func RegisterFont(family string, fontBytes []byte) error {
@@ -69,6 +89,64 @@ func RegisterFont(family string, fontBytes []byte) error {
 	return nil
 }
 
+// registerFontIfAbsent parses fontBytes and registers it under family only if no
+// font is already registered under that (lower-cased) name. It lets the lazy
+// system-font loader fill in defaults without clobbering a font the caller
+// registered explicitly via RegisterFont. The presence check and the insert
+// happen under the same write lock to avoid a TOCTOU race with a concurrent
+// RegisterFont.
+func registerFontIfAbsent(family string, fontBytes []byte) error {
+	f, err := sfnt.Parse(fontBytes)
+	if err != nil {
+		return err
+	}
+	fontRegistryMu.Lock()
+	defer fontRegistryMu.Unlock()
+	name := strings.ToLower(family)
+	if _, exists := fontRegistry[name]; exists {
+		return nil
+	}
+	fontRegistry[name] = f
+	fontBytesRegistry[name] = fontBytes
+	fontIndexRegistry[name] = 0
+	return nil
+}
+
+// registerFontCollectionIfAbsent registers the faces of a TTC/collection without
+// overwriting existing registrations: the bare family name binds to face 0 only
+// when it is not already present, and each indexed "name-i" key is filled only
+// when absent. Used by the lazy system-font loader so it never clobbers caller
+// registrations. The whole update runs under the write lock (TOCTOU safety).
+func registerFontCollectionIfAbsent(family string, collectionBytes []byte) error {
+	coll, err := sfnt.ParseCollection(collectionBytes)
+	if err != nil {
+		return err
+	}
+	fontRegistryMu.Lock()
+	defer fontRegistryMu.Unlock()
+	name := strings.ToLower(family)
+	for i := 0; i < coll.NumFonts(); i++ {
+		f, err := coll.Font(i)
+		if err != nil {
+			continue
+		}
+		if i == 0 {
+			if _, exists := fontRegistry[name]; !exists {
+				fontRegistry[name] = f
+				fontBytesRegistry[name] = collectionBytes
+				fontIndexRegistry[name] = i
+			}
+		}
+		nameIdx := name + "-" + strconv.Itoa(i)
+		if _, exists := fontRegistry[nameIdx]; !exists {
+			fontRegistry[nameIdx] = f
+			fontBytesRegistry[nameIdx] = collectionBytes
+			fontIndexRegistry[nameIdx] = i
+		}
+	}
+	return nil
+}
+
 // RegisterFontCollection registers all fonts inside a TTC/collection.
 func RegisterFontCollection(family string, collectionBytes []byte) error {
 	coll, err := sfnt.ParseCollection(collectionBytes)
@@ -77,19 +155,24 @@ func RegisterFontCollection(family string, collectionBytes []byte) error {
 	}
 	fontRegistryMu.Lock()
 	defer fontRegistryMu.Unlock()
+	name := strings.ToLower(family)
 	for i := 0; i < coll.NumFonts(); i++ {
 		f, err := coll.Font(i)
-		if err == nil {
-			name := strings.ToLower(family)
-			nameIdx := name + "-" + strconv.Itoa(i)
+		if err != nil {
+			continue
+		}
+		// The bare family name binds to the first face only. Previously every
+		// face overwrote it, so the last member of the collection silently won;
+		// the indexed "name-i" keys still expose the other faces.
+		if i == 0 {
 			fontRegistry[name] = f
 			fontBytesRegistry[name] = collectionBytes
 			fontIndexRegistry[name] = i
-
-			fontRegistry[nameIdx] = f
-			fontBytesRegistry[nameIdx] = collectionBytes
-			fontIndexRegistry[nameIdx] = i
 		}
+		nameIdx := name + "-" + strconv.Itoa(i)
+		fontRegistry[nameIdx] = f
+		fontBytesRegistry[nameIdx] = collectionBytes
+		fontIndexRegistry[nameIdx] = i
 	}
 	return nil
 }
@@ -171,24 +254,51 @@ func init() {
 		fontRegistry["monospace-bold"] = fb
 		fontRegistryMu.Unlock()
 	}
+	// NOTE: system/emoji fonts are intentionally NOT loaded here. On macOS the
+	// Apple Color Emoji TTC alone is ~180 MB of heap, which every importer of
+	// this package would pay at init even when no text is ever rendered. They
+	// are loaded lazily by LoadSystemFonts on the first <text> layout instead.
+}
 
-	// Try loading some common system fonts
+// loadSystemFonts reads the per-GOOS system and emoji/symbol font files from
+// disk and registers any that are present. Missing files are ignored. It is
+// invoked exactly once, via LoadSystemFonts.
+func loadSystemFonts() {
+	// Try loading some common system fonts. Register non-destructively so a font
+	// the caller registered explicitly (via RegisterFont) is never clobbered.
 	for _, info := range systemFonts {
 		if data, err := os.ReadFile(info.path); err == nil {
-			_ = RegisterFont(info.name, data)
+			_ = registerFontIfAbsent(info.name, data)
 		}
 	}
 
-	// Try loading some emoji/symbol fonts
+	// Try loading some emoji/symbol fonts (likewise non-destructive).
 	for _, info := range emojiFonts {
 		if data, err := os.ReadFile(info.path); err == nil {
 			if info.coll {
-				_ = RegisterFontCollection(info.name, data)
+				_ = registerFontCollectionIfAbsent(info.name, data)
 			} else {
-				_ = RegisterFont(info.name, data)
+				_ = registerFontIfAbsent(info.name, data)
 			}
 		}
 	}
+}
+
+// LoadSystemFonts loads the platform's system and emoji/symbol fonts into the
+// font registry. It is safe to call concurrently and does the work at most once
+// (subsequent calls are no-ops). oksvg calls it automatically the first time a
+// <text> element is laid out, so the (large) emoji fonts are read from disk only
+// when text is actually rendered rather than at package import. Callers that
+// register fonts before rendering, or that want the load cost paid up front, may
+// call it explicitly.
+func LoadSystemFonts() { systemFontsOnce.Do(loadSystemFonts) }
+
+// gradHrefLink records a gradient that inherits its stops from another gradient
+// via xlink:href/href. It is resolved after the whole document is parsed so
+// forward references work regardless of element order.
+type gradHrefLink struct {
+	grad   *rasterx.Gradient
+	target string
 }
 
 // IconCursor is used while parsing SVG files.
@@ -198,11 +308,33 @@ type IconCursor struct {
 	StyleStack                                           []PathStyle
 	grad                                                 *rasterx.Gradient
 	inTitleText, inDescText, inGrad, inDefs, inDefsStyle bool
-	currentDef                                           []definition
 	inText                                               bool
 	textFragments                                        []textFragment
 	textX, textY, textDx, textDy                         float64
 	hasTextX, hasTextY                                   bool
+	// defDepth is the current nesting depth within <defs>; openDefs holds the
+	// collectors for every ID'd element currently open.
+	defDepth int
+	openDefs []*defCollector
+	// defsNesting counts open <defs> elements. defs mode stays on until the
+	// outermost </defs>, so a nested </defs> can't prematurely flush the outer
+	// collection (which would render the outer defs' remaining children and drop
+	// their ids).
+	defsNesting int
+	// classInfo accumulates the raw text of <style> elements for CSS parsing.
+	classInfo string
+	// pendingGradHrefs records gradient stop-inheritance links to resolve at EOF.
+	pendingGradHrefs []gradHrefLink
+	// skipShapeDepth tracks a subtree being skipped (e.g. a <pattern> that
+	// appears outside <defs>, whose tile children must not be drawn as shapes).
+	skipShapeDepth int
+	// useActive is the set of href ids currently being replayed by useF, and
+	// useDepth is the current <use> replay nesting depth. Together they detect a
+	// cyclic <use> chain (self-reference #a->#a or mutual #a->#b->#a) and cap
+	// pathological nesting, so a malicious/broken document is routed through the
+	// error-mode policy instead of recursing until the goroutine stack overflows.
+	useActive map[string]bool
+	useDepth  int
 }
 
 // ReadGradURL reads an SVG format gradient url
@@ -227,7 +359,16 @@ func (c *IconCursor) ReadGradURL(v string, defaultColor interface{}) (grad raste
 func (c *IconCursor) ReadGradAttr(attr xml.Attr) (err error) {
 	switch attr.Name.Local {
 	case "gradientTransform":
-		c.grad.Matrix, err = c.parseTransform(attr.Value)
+		// Seed from Identity: gradientTransform is absolute and must not fold in
+		// the referencing/ancestor element transform (which would double-apply).
+		c.grad.Matrix, err = c.parseTransformFrom(attr.Value, rasterx.Identity)
+	case "href":
+		// xlink:href and href both surface as Name.Local == "href". Record the
+		// stop-inheritance link; it is resolved at EOF by finalize().
+		c.pendingGradHrefs = append(c.pendingGradHrefs, gradHrefLink{
+			grad:   c.grad,
+			target: strings.TrimPrefix(strings.TrimSpace(attr.Value), "#"),
+		})
 	case "gradientUnits":
 		switch strings.TrimSpace(attr.Value) {
 		case "userSpaceOnUse":
@@ -248,38 +389,67 @@ func (c *IconCursor) ReadGradAttr(attr xml.Attr) (err error) {
 	return
 }
 
-// PushStyle parses the style element, and push it on the style stack. Only color and opacity are supported
-// for fill. Note that this parses both the contents of a style attribute plus
-// direct fill and opacity attributes.
+// PushStyle parses the style attributes of an element and pushes the resulting
+// style onto the style stack. Properties are applied in CSS precedence order:
+// class selectors (lowest), then presentation attributes, then the inline
+// style="" attribute (highest). Per-property parse errors are handled according
+// to the error mode: StrictErrorMode aborts the parse; Warn logs and skips the
+// property; Ignore skips silently. The style is always pushed (even when a
+// property is skipped) so the stack stays balanced with EndElement pops.
 func (c *IconCursor) PushStyle(attrs []xml.Attr) error {
-	var pairs []string
-	className := ""
+	var attrPairs, stylePairs, classNames []string
 	for _, attr := range attrs {
 		switch strings.ToLower(attr.Name.Local) {
 		case "style":
-			pairs = append(pairs, strings.Split(attr.Value, ";")...)
+			stylePairs = append(stylePairs, strings.Split(attr.Value, ";")...)
 		case "class":
-			className = attr.Value
+			classNames = append(classNames, strings.Fields(attr.Value)...)
 		default:
-			pairs = append(pairs, attr.Name.Local+":"+attr.Value)
+			attrPairs = append(attrPairs, attr.Name.Local+":"+attr.Value)
 		}
 	}
-	// Make a copy of the top style
+	// Make a copy of the top style.
 	curStyle := c.StyleStack[len(c.StyleStack)-1]
+
+	// Lowest precedence: class selectors, in listed order.
+	if err := c.adaptClasses(&curStyle, classNames); err != nil {
+		return err
+	}
+	// Middle precedence: presentation attributes.
+	if err := c.applyStylePairs(&curStyle, attrPairs); err != nil {
+		return err
+	}
+	// Highest precedence: the inline style="" attribute.
+	if err := c.applyStylePairs(&curStyle, stylePairs); err != nil {
+		return err
+	}
+
+	c.StyleStack = append(c.StyleStack, curStyle) // Push style onto stack
+	return nil
+}
+
+// applyStylePairs applies "key:value" style declarations to curStyle, routing
+// per-property parse errors through the error-mode policy. It returns a non-nil
+// error only in StrictErrorMode.
+func (c *IconCursor) applyStylePairs(curStyle *PathStyle, pairs []string) error {
 	for _, pair := range pairs {
-		kv := strings.Split(pair, ":")
-		if len(kv) >= 2 {
-			k := strings.ToLower(kv[0])
-			k = strings.TrimSpace(k)
-			v := strings.TrimSpace(kv[1])
-			err := c.readStyleAttr(&curStyle, k, v)
-			if err != nil {
-				return err
+		kv := strings.SplitN(pair, ":", 2)
+		if len(kv) < 2 {
+			continue
+		}
+		k := strings.TrimSpace(strings.ToLower(kv[0]))
+		v := strings.TrimSpace(kv[1])
+		if k == "" {
+			continue
+		}
+		if err := c.readStyleAttr(curStyle, k, v); err != nil {
+			e := fmt.Sprintf("error parsing style property %q: %s", pair, err.Error())
+			if c.returnError(e) {
+				return errors.New(e)
 			}
+			// Non-strict: skip this property and keep the inherited value.
 		}
 	}
-	c.adaptClasses(&curStyle, className)
-	c.StyleStack = append(c.StyleStack, curStyle) // Push style onto stack
 	return nil
 }
 
@@ -354,6 +524,11 @@ func (c *IconCursor) parseTransform(v string) (rasterx.Matrix2D, error) {
 func (c *IconCursor) parseTransformFrom(v string, m1 rasterx.Matrix2D) (rasterx.Matrix2D, error) {
 	ts := strings.Split(v, ")")
 	for _, t := range ts {
+		// Transform lists may be separated by commas as well as whitespace,
+		// e.g. "translate(1,1),rotate(45)". Strip any leading/trailing commas
+		// (and surrounding space) left over from the ")" split.
+		t = strings.TrimSpace(t)
+		t = strings.Trim(t, ",")
 		t = strings.TrimSpace(t)
 		if len(t) == 0 {
 			continue
@@ -377,28 +552,74 @@ func (c *IconCursor) parseTransformFrom(v string, m1 rasterx.Matrix2D) (rasterx.
 func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 	switch k {
 	case "fill":
+		// Any explicit fill supersedes an inherited unresolved paint ref.
+		curStyle.pendingFillURL = ""
 		gradient, ok := c.ReadGradURL(v, curStyle.fillerColor)
 		if ok {
+			if len(gradient.Stops) == 0 {
+				// The gradient exists but has no stops yet: it inherits them from
+				// another gradient via href, which finalize() only copies in AFTER
+				// the whole document is parsed. Defer instead of freezing a
+				// zero-stop value copy (which renders black); finalize resolves
+				// href inheritance first, then re-resolves this reference.
+				if id, isURL := parseURLID(v); isURL {
+					curStyle.fillerColor = nil
+					curStyle.pendingFillURL = id
+					break
+				}
+			}
 			curStyle.fillerColor = gradient
 			break
 		}
-		pattern, ok := c.ReadPatternURL(v)
+		pattern, ok, perr := c.readPatternURL(v)
+		if perr != nil {
+			return perr
+		}
 		if ok {
 			curStyle.fillerColor = pattern
+			break
+		}
+		if id, isURL := parseURLID(v); isURL {
+			// The gradient/pattern is not defined yet. Record the id as a
+			// forward paint reference and leave fill none (nil) for now;
+			// finalize() resolves it once the whole document is parsed. If it
+			// still does not resolve at EOF, none is the correct SVG fallback.
+			curStyle.fillerColor = nil
+			curStyle.pendingFillURL = id
 			break
 		}
 		var err error
 		curStyle.fillerColor, err = ParseSVGColor(v)
 		return err
 	case "stroke":
+		// Any explicit stroke supersedes an inherited unresolved paint ref.
+		curStyle.pendingStrokeURL = ""
 		gradient, ok := c.ReadGradURL(v, curStyle.linerColor)
 		if ok {
+			if len(gradient.Stops) == 0 {
+				// Zero-stop gradient inheriting stops via href; defer so finalize
+				// re-resolves it after copying the inherited stops. (See fill.)
+				if id, isURL := parseURLID(v); isURL {
+					curStyle.linerColor = nil
+					curStyle.pendingStrokeURL = id
+					break
+				}
+			}
 			curStyle.linerColor = gradient
 			break
 		}
-		pattern, ok := c.ReadPatternURL(v)
+		pattern, ok, perr := c.readPatternURL(v)
+		if perr != nil {
+			return perr
+		}
 		if ok {
 			curStyle.linerColor = pattern
+			break
+		}
+		if id, isURL := parseURLID(v); isURL {
+			// Forward paint reference: resolved later in finalize().
+			curStyle.linerColor = nil
+			curStyle.pendingStrokeURL = id
 			break
 		}
 		col, errc := ParseSVGColor(v)
@@ -481,29 +702,40 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 		}
 		curStyle.DashOffset = dashOffset
 	case "stroke-dasharray":
-		if v != "none" {
-			dashes := splitOnCommaOrSpace(v)
-			dList := make([]float64, len(dashes))
-			for i, dstr := range dashes {
-				d, err := parseFloat(strings.TrimSpace(dstr), 64)
-				if err != nil {
-					return err
-				}
-				dList[i] = d
-			}
-			curStyle.Dash = dList
+		if v == "none" {
+			// Explicitly clear inherited dashes rather than leaving them intact.
+			curStyle.Dash = nil
 			break
 		}
+		dashes := splitOnCommaOrSpace(v)
+		dList := make([]float64, len(dashes))
+		for i, dstr := range dashes {
+			d, err := parseFloat(strings.TrimSpace(dstr), 64)
+			if err != nil {
+				return err
+			}
+			dList[i] = d
+		}
+		curStyle.Dash = dList
 	case "opacity", "stroke-opacity", "fill-opacity":
 		op, err := parseFloat(v, 64)
 		if err != nil {
 			return err
 		}
-		if k != "stroke-opacity" {
-			curStyle.FillOpacity *= op
-		}
-		if k != "fill-opacity" {
-			curStyle.LineOpacity *= op
+		op = clamp01(op)
+		switch k {
+		case "fill-opacity":
+			// fill-opacity/stroke-opacity SET (replace) the per-element paint
+			// opacity; they do not inherit-multiply.
+			curStyle.FillOpacity = op
+		case "stroke-opacity":
+			curStyle.LineOpacity = op
+		default: // "opacity"
+			// Plain opacity is group opacity. True group compositing would
+			// flatten the subtree and apply opacity once to the result; as an
+			// approximation we accumulate it into groupOpacity, which multiplies
+			// each descendant's fill/line opacity at draw time.
+			curStyle.groupOpacity *= op
 		}
 	case "transform":
 		m, err := c.parseTransform(v)
@@ -514,16 +746,17 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 	case "font-family":
 		curStyle.FontFamily = v
 	case "font-size":
-		v = strings.TrimSuffix(v, "px")
-		v = strings.TrimSuffix(v, "pt")
-		val, err := parseFloat(v, 64)
+		val, err := parseFontSize(v, curStyle.FontSize)
 		if err != nil {
 			return err
 		}
-		if val > maxFontSize {
-			val = maxFontSize
+		// A non-positive resolved size keeps the inherited value.
+		if val > 0 {
+			if val > maxFontSize {
+				val = maxFontSize
+			}
+			curStyle.FontSize = val
 		}
-		curStyle.FontSize = val
 	case "text-anchor":
 		curStyle.TextAnchor = v
 	case "font-weight":
@@ -533,10 +766,44 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 }
 
 func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
-	var skipDef bool
-	if se.Name.Local == "radialGradient" || se.Name.Local == "linearGradient" || c.inGrad {
-		skipDef = true
+	name := se.Name.Local
+
+	// If we are inside a skipped subtree (e.g. a top-level <pattern>), swallow
+	// every descendant. The matching EndElement unwinds the depth counter.
+	// Exception: gradient definitions (and their stops) inside the subtree are
+	// paint servers that may be referenced elsewhere in the document, so keep
+	// dispatching them into icon.Grads instead of dropping them. They are not
+	// counted against skipShapeDepth (readEndElement mirrors this).
+	if c.skipShapeDepth > 0 {
+		if name == "radialGradient" || name == "linearGradient" || c.inGrad {
+			if df, ok := drawFuncs[name]; ok {
+				if err := df(c, se.Attr); err != nil {
+					e := fmt.Sprintf("error during processing svg element %s: %s", name, err.Error())
+					if c.returnError(e) {
+						return errors.New(e)
+					}
+				}
+			}
+			return nil
+		}
+		c.skipShapeDepth++
+		return nil
 	}
+
+	// <defs> is a container, not a collected definition. Track nesting so a
+	// nested </defs> doesn't prematurely end the outer collection. Both the
+	// outermost and any nested <defs> just bump the counter and ensure defs mode
+	// is on; they are never added to the flat def lists or the depth model.
+	if name == "defs" {
+		c.defsNesting++
+		c.inDefs = true
+		return nil
+	}
+
+	// Gradient elements (and their stops) are not part of the flat defs model;
+	// they are compiled directly into icon.Grads by their draw funcs.
+	skipDef := name == "radialGradient" || name == "linearGradient" || c.inGrad
+
 	if c.inDefs && !skipDef {
 		ID := ""
 		for _, attr := range se.Attr {
@@ -544,20 +811,36 @@ func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
 				ID = attr.Value
 			}
 		}
-		if ID != "" && len(c.currentDef) > 0 {
-			c.icon.Defs[c.currentDef[0].ID] = c.currentDef
-			c.currentDef = make([]definition, 0)
+		c.defDepth++
+		def := definition{ID: ID, Tag: name, Attrs: se.Attr}
+		// Every open collector contains this element's def (nested elements
+		// belong to their ancestors' replay lists as well as their own).
+		for _, col := range c.openDefs {
+			col.defs = append(col.defs, def)
 		}
-		c.currentDef = append(c.currentDef, definition{
-			ID:    ID,
-			Tag:   se.Name.Local,
-			Attrs: se.Attr,
-		})
+		if ID != "" {
+			c.openDefs = append(c.openDefs, &defCollector{
+				id:        ID,
+				openDepth: c.defDepth,
+				defs:      []definition{def},
+			})
+		}
 		return nil
 	}
-	df, ok := drawFuncs[se.Name.Local]
+
+	// A <pattern> outside <defs> is a paint server, not a shape; painting its
+	// tile children as ordinary shapes is wrong. Skip the whole subtree.
+	if name == "pattern" && !c.inDefs {
+		c.skipShapeDepth = 1
+		if c.ErrorMode == WarnErrorMode {
+			log.Println("pattern outside defs is not rendered")
+		}
+		return nil
+	}
+
+	df, ok := drawFuncs[name]
 	if !ok {
-		errStr := "Cannot process svg element " + se.Name.Local
+		errStr := "Cannot process svg element " + name
 		if c.returnError(errStr) {
 			return errors.New(errStr)
 		}
@@ -565,9 +848,9 @@ func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
 	}
 	err = df(c, se.Attr)
 	if err != nil {
-		e := fmt.Sprintf("error during processing svg element %s: %s", se.Name.Local, err.Error())
+		e := fmt.Sprintf("error during processing svg element %s: %s", name, err.Error())
 		if c.returnError(e) {
-			err = errors.New(e)
+			return errors.New(e)
 		}
 		err = nil
 	}
@@ -577,19 +860,354 @@ func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
 		pathCopy := make(rasterx.Path, len(c.Path))
 		copy(pathCopy, c.Path)
 		c.icon.SVGPaths = append(c.icon.SVGPaths,
-			SvgPath{c.StyleStack[len(c.StyleStack)-1], pathCopy})
+			SvgPath{
+				PathStyle: c.StyleStack[len(c.StyleStack)-1],
+				Path:      pathCopy,
+				order:     c.icon.nextOrder(),
+			})
 		c.Path = c.Path[:0]
 	}
 	return
 }
 
-func (c *IconCursor) adaptClasses(pathStyle *PathStyle, className string) {
-	if className == "" || len(c.icon.classes) == 0 {
+// readEndElement mirrors readStartElement: it pops the style pushed for the
+// element (guarded against stack underflow on malformed input), unwinds the
+// defs collection / skip-subtree state, and dispatches the per-tag end actions.
+func (c *IconCursor) readEndElement(se xml.EndElement) error {
+	// Pop the style pushed for this element.
+	if len(c.StyleStack) > 1 {
+		c.StyleStack = c.StyleStack[:len(c.StyleStack)-1]
+	}
+
+	// Unwind a skipped subtree (top-level pattern, etc.). Gradient ends (and
+	// stops) inside the subtree were dispatched, not counted, in
+	// readStartElement, so their ends unwind gradient state without touching
+	// skipShapeDepth. Everything else decrements the depth counter as before.
+	if c.skipShapeDepth > 0 {
+		name := se.Name.Local
+		switch {
+		case name == "radialGradient" || name == "linearGradient":
+			c.inGrad = false
+		case c.inGrad:
+			// A stop's end inside a gradient; nothing to unwind.
+		default:
+			c.skipShapeDepth--
+		}
+		return nil
+	}
+
+	name := se.Name.Local
+
+	// Depth-aware defs collection: close/flush collectors as elements end.
+	// Gradient starts never incremented defDepth, so their ends must not
+	// decrement it.
+	if c.inDefs && name != "defs" && name != "radialGradient" && name != "linearGradient" && !c.inGrad {
+		c.endDefElement(name)
+	}
+
+	switch name {
+	case "text":
+		c.inText = false
+		return c.compileText()
+	case "title":
+		c.inTitleText = false
+	case "desc":
+		c.inDescText = false
+	case "defs":
+		// Only the outermost </defs> flushes the collection and leaves defs mode.
+		if c.defsNesting > 0 {
+			c.defsNesting--
+		}
+		if c.defsNesting == 0 {
+			c.closeAllDefs()
+			c.inDefs = false
+		}
+	case "radialGradient", "linearGradient":
+		c.inGrad = false
+	case "style":
+		if c.inDefsStyle {
+			classes, err := parseClasses(c.classInfo)
+			if err != nil {
+				// Route malformed CSS through the error-mode policy like every
+				// other style error: strict aborts; warn logs; ignore continues.
+				e := fmt.Sprintf("error parsing <style> classes: %s", err.Error())
+				if c.returnError(e) {
+					return errors.New(e)
+				}
+				// Non-strict: keep whatever classes parsed before the error.
+			}
+			c.icon.classes = classes
+			c.inDefsStyle = false
+		}
+	}
+	return nil
+}
+
+// endDefElement handles the EndElement of an element that started inside
+// <defs>. For a g/pattern end it appends a balancing endg/endpattern marker to
+// every still-open collector (each of which contains that start), then flushes
+// every collector opened at the current depth.
+func (c *IconCursor) endDefElement(tag string) {
+	if c.defDepth == 0 {
 		return
 	}
-	for k, v := range c.icon.classes[className] {
-		c.readStyleAttr(pathStyle, k, v)
+	if tag == "g" || tag == "pattern" {
+		marker := "endg"
+		if tag == "pattern" {
+			marker = "endpattern"
+		}
+		for _, col := range c.openDefs {
+			if col.openDepth <= c.defDepth {
+				col.defs = append(col.defs, definition{Tag: marker})
+			}
+		}
 	}
+	kept := c.openDefs[:0]
+	for _, col := range c.openDefs {
+		if col.openDepth == c.defDepth {
+			c.icon.Defs[col.id] = col.defs
+		} else {
+			kept = append(kept, col)
+		}
+	}
+	c.openDefs = kept
+	c.defDepth--
+}
+
+// closeAllDefs flushes any collectors still open when </defs> is reached and
+// resets the defs collection state.
+func (c *IconCursor) closeAllDefs() {
+	for _, col := range c.openDefs {
+		c.icon.Defs[col.id] = col.defs
+	}
+	c.openDefs = nil
+	c.defDepth = 0
+}
+
+// parseURLID extracts the fragment id from a url(#id) reference, tolerating
+// surrounding whitespace and quotes. It reports whether v is a url() reference.
+func parseURLID(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(v, "url(") || !strings.HasSuffix(v, ")") {
+		return "", false
+	}
+	inner := strings.TrimSpace(v[4 : len(v)-1])
+	inner = strings.Trim(inner, `'"`)
+	inner = strings.TrimSpace(inner)
+	if !strings.HasPrefix(inner, "#") {
+		return "", false
+	}
+	return strings.TrimSpace(inner[1:]), true
+}
+
+// parseFontSize resolves an SVG font-size value against the inherited size.
+// px and unitless values are taken as-is; pt is scaled by 4/3; the absolute
+// units mm/cm/in/pc convert via the CSS px-per-unit factors (96px/in); em/rem
+// scale the inherited size; % is inherited*v/100. Keywords and unparsable values
+// return an error (handled per the error-mode policy by the caller).
+func parseFontSize(v string, inherited float64) (float64, error) {
+	v = strings.TrimSpace(v)
+	num := v
+	factor := 1.0
+	switch {
+	case strings.HasSuffix(v, "px"):
+		num = strings.TrimSuffix(v, "px")
+	case strings.HasSuffix(v, "pt"):
+		num = strings.TrimSuffix(v, "pt")
+		factor = 4.0 / 3.0
+	case strings.HasSuffix(v, "mm"):
+		num = strings.TrimSuffix(v, "mm")
+		factor = 96.0 / 25.4 // CSS px per millimeter
+	case strings.HasSuffix(v, "cm"):
+		num = strings.TrimSuffix(v, "cm")
+		factor = 96.0 / 2.54 // CSS px per centimeter
+	case strings.HasSuffix(v, "in"):
+		num = strings.TrimSuffix(v, "in")
+		factor = 96.0 // CSS px per inch
+	case strings.HasSuffix(v, "pc"):
+		num = strings.TrimSuffix(v, "pc")
+		factor = 16.0 // CSS px per pica (1pc = 12pt = 16px)
+	case strings.HasSuffix(v, "rem"): // must precede the "em" check
+		num = strings.TrimSuffix(v, "rem")
+		factor = inherited
+	case strings.HasSuffix(v, "em"):
+		num = strings.TrimSuffix(v, "em")
+		factor = inherited
+	case strings.HasSuffix(v, "%"):
+		num = strings.TrimSuffix(v, "%")
+		factor = inherited / 100
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(num), 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid font-size %q: %w", v, err)
+	}
+	return n * factor, nil
+}
+
+// appendTextChunk normalizes an SVG text CharData chunk (default xml:space
+// handling: drop CR/LF, turn tabs into spaces, collapse space runs) and appends
+// it as a text fragment. Empty results are dropped. Cross-fragment trimming is
+// handled later in compileText.
+func (c *IconCursor) appendTextChunk(data []byte) {
+	var b strings.Builder
+	b.Grow(len(data))
+	prevSpace := false
+	for _, r := range string(data) {
+		switch r {
+		case '\n', '\r':
+			continue
+		case '\t', ' ':
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+		default:
+			b.WriteRune(r)
+			prevSpace = false
+		}
+	}
+	text := b.String()
+	if text == "" {
+		return
+	}
+	c.textFragments = append(c.textFragments, textFragment{
+		text:  text,
+		style: c.StyleStack[len(c.StyleStack)-1],
+		x:     c.textX,
+		y:     c.textY,
+		dx:    c.textDx,
+		dy:    c.textDy,
+		hasX:  c.hasTextX,
+		hasY:  c.hasTextY,
+	})
+	c.textDx = 0
+	c.textDy = 0
+	c.hasTextX = false
+	c.hasTextY = false
+}
+
+// finalize resolves deferred parse state at end-of-document: first it copies
+// gradient stops along recorded xlink:href/href inheritance chains, then it
+// resolves forward paint references (fill/stroke url(#id) that pointed at a
+// gradient or pattern declared later in the document).
+func (c *IconCursor) finalize() error {
+	for _, link := range c.pendingGradHrefs {
+		if link.grad == nil || len(link.grad.Stops) > 0 {
+			continue
+		}
+		if stops := c.resolveGradStops(link.target, map[string]bool{}, 0); stops != nil {
+			// Copy so the inheriting gradient does not alias the source's slice.
+			cp := make([]rasterx.GradStop, len(stops))
+			copy(cp, stops)
+			link.grad.Stops = cp
+		}
+	}
+
+	// Forward paint references. Every gradient/pattern is known now, so resolve
+	// any fill/stroke that referenced one before it was declared. Unresolvable
+	// references keep the SVG "none" fallback (nil paint).
+	c.resolvePendingPaints(c.icon.SVGPaths)
+
+	// Pattern tile children can carry the same forward references (a tile shape
+	// filling url(#g) with g declared later). Resolving icon.SVGPaths alone left
+	// those nil -> transparent tiles. Snapshot the pattern pointers first: a
+	// resolve can compile a forward-referenced pattern and mutate the map, which
+	// would otherwise panic mid-iteration. Any pattern compiled now (at EOF) sees
+	// every gradient already, so it produces no new pending paints of its own.
+	pats := make([]*Pattern, 0, len(c.icon.Patterns))
+	for _, p := range c.icon.Patterns {
+		pats = append(pats, p)
+	}
+	for _, p := range pats {
+		c.resolvePendingPaints(p.Paths)
+	}
+	return nil
+}
+
+// resolvePendingPaints resolves every deferred fill/stroke url(#id) reference in
+// paths (see resolvePendingPaint). Unresolvable references fall back to none
+// (nil paint), logged in WarnErrorMode. It mutates paths in place.
+func (c *IconCursor) resolvePendingPaints(paths []SvgPath) {
+	for i := range paths {
+		sp := &paths[i]
+		if sp.pendingFillURL != "" {
+			if paint, ok := c.resolvePendingPaint(sp.pendingFillURL, sp.fillerColor); ok {
+				sp.fillerColor = paint
+			} else if c.ErrorMode == WarnErrorMode {
+				log.Println("fill url(#" + sp.pendingFillURL + ") never resolved to a gradient or pattern; falling back to none")
+			}
+			sp.pendingFillURL = ""
+		}
+		if sp.pendingStrokeURL != "" {
+			if paint, ok := c.resolvePendingPaint(sp.pendingStrokeURL, sp.linerColor); ok {
+				sp.linerColor = paint
+			} else if c.ErrorMode == WarnErrorMode {
+				log.Println("stroke url(#" + sp.pendingStrokeURL + ") never resolved to a gradient or pattern; falling back to none")
+			}
+			sp.pendingStrokeURL = ""
+		}
+	}
+}
+
+// resolvePendingPaint resolves a deferred url(#id) paint reference to the final
+// gradient (localized against defaultColor, as ReadGradURL does) or pattern.
+// It reports whether the id resolved.
+func (c *IconCursor) resolvePendingPaint(id string, defaultColor interface{}) (interface{}, bool) {
+	url := "url(#" + id + ")"
+	if grad, ok := c.ReadGradURL(url, defaultColor); ok {
+		return grad, true
+	}
+	if pat, ok := c.ReadPatternURL(url); ok {
+		return pat, true
+	}
+	return nil, false
+}
+
+// resolveGradStops follows an xlink:href chain (cycle-guarded, depth <= 8) to
+// the first gradient that defines stops, returning them.
+func (c *IconCursor) resolveGradStops(target string, seen map[string]bool, depth int) []rasterx.GradStop {
+	if depth > 8 || target == "" || seen[target] {
+		return nil
+	}
+	seen[target] = true
+	g, ok := c.icon.Grads[target]
+	if !ok {
+		return nil
+	}
+	if len(g.Stops) > 0 {
+		return g.Stops
+	}
+	// The target itself may inherit its stops from another gradient.
+	for _, link := range c.pendingGradHrefs {
+		if link.grad == g {
+			return c.resolveGradStops(link.target, seen, depth+1)
+		}
+	}
+	return nil
+}
+
+// adaptClasses applies the named class selectors to pathStyle, in order. Per
+// property errors are routed through the error-mode policy (StrictErrorMode
+// aborts; Warn logs and skips; Ignore skips silently).
+func (c *IconCursor) adaptClasses(pathStyle *PathStyle, classNames []string) error {
+	if len(classNames) == 0 || len(c.icon.classes) == 0 {
+		return nil
+	}
+	for _, className := range classNames {
+		attrMap, ok := c.icon.classes[className]
+		if !ok {
+			continue
+		}
+		for k, v := range attrMap {
+			if err := c.readStyleAttr(pathStyle, k, v); err != nil {
+				e := fmt.Sprintf("error parsing class %q property %s:%s: %s", className, k, v, err.Error())
+				if c.returnError(e) {
+					return errors.New(e)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (c *IconCursor) returnError(errMsg string) bool {
@@ -612,14 +1230,41 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 		Patterns:  origIcon.Patterns,
 		ViewBox:   origIcon.ViewBox,
 		Transform: rasterx.Identity,
+		// Share the CSS class table so pattern tile children can resolve class
+		// selectors (adaptClasses reads c.icon.classes).
+		classes: origIcon.classes,
 	}
 	c.icon = dummyIcon
 
 	origStyleStack := c.StyleStack
 	c.StyleStack = []PathStyle{DefaultStyle}
 
-	for _, def := range defs {
-		if def.Tag == "pattern" || def.Tag == "endpattern" {
+	for i := 0; i < len(defs); i++ {
+		def := defs[i]
+		if def.Tag == "pattern" {
+			if i == 0 {
+				// defs[0] is this pattern's own marker (compilePattern already
+				// consumed its attrs); its direct children follow.
+				continue
+			}
+			// A nested pattern: its children belong to that pattern's own tile
+			// (compiled independently via ReadPatternURL), not this one. Skip the
+			// whole span to its matching endpattern, tracking depth for further
+			// nesting (mirrors useF's span-skip).
+			depth := 1
+			for i++; i < len(defs) && depth > 0; i++ {
+				switch defs[i].Tag {
+				case "pattern":
+					depth++
+				case "endpattern":
+					depth--
+				}
+			}
+			i-- // outer loop's i++ steps past the matched endpattern
+			continue
+		}
+		if def.Tag == "endpattern" {
+			// This pattern's own closing marker (or a stray one); ignore.
 			continue
 		}
 		if def.Tag == "endg" {
@@ -632,6 +1277,10 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 		if err := c.PushStyle(def.Attrs); err != nil {
 			c.icon = origIcon
 			c.StyleStack = origStyleStack
+			// Clear any partial geometry a failing property (e.g. a transform, or
+			// a nested pattern compile) left in the cursor, so it cannot leak into
+			// the next element compiled with this cursor.
+			c.Path = c.Path[:0]
 			return nil, err
 		}
 
@@ -640,6 +1289,10 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 			if err := df(c, def.Attrs); err != nil {
 				c.icon = origIcon
 				c.StyleStack = origStyleStack
+				// A drawFunc can populate c.Path before erroring (e.g. a path with
+				// a bad trailing segment). Clear it so the partial geometry does
+				// not leak into the next element's SvgPath.
+				c.Path = c.Path[:0]
 				return nil, err
 			}
 		}
@@ -647,7 +1300,11 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 		if len(c.Path) > 0 {
 			pathCopy := make(rasterx.Path, len(c.Path))
 			copy(pathCopy, c.Path)
-			c.icon.SVGPaths = append(c.icon.SVGPaths, SvgPath{c.StyleStack[len(c.StyleStack)-1], pathCopy})
+			c.icon.SVGPaths = append(c.icon.SVGPaths, SvgPath{
+				PathStyle: c.StyleStack[len(c.StyleStack)-1],
+				Path:      pathCopy,
+				order:     c.icon.nextOrder(),
+			})
 			c.Path = c.Path[:0]
 		}
 
@@ -719,29 +1376,39 @@ func (c *IconCursor) compilePattern(defs []definition) (*Pattern, error) {
 	return p, nil
 }
 
-// ReadPatternURL parses an SVG pattern url reference.
-func (c *IconCursor) ReadPatternURL(v string) (pattern *Pattern, ok bool) {
+// readPatternURL is the internal form of ReadPatternURL that also returns any
+// pattern-child compile error, so readStyleAttr can route it through the
+// error-mode policy (strict surfaces it) instead of silently dropping it.
+func (c *IconCursor) readPatternURL(v string) (pattern *Pattern, ok bool, err error) {
 	if strings.HasPrefix(v, "url(") && strings.HasSuffix(v, ")") {
 		urlStr := strings.TrimSpace(v[4 : len(v)-1])
 		if strings.HasPrefix(urlStr, "#") {
 			id := urlStr[1:]
-			pattern, ok = c.icon.Patterns[id]
-			if ok {
-				return
+			if pattern, ok = c.icon.Patterns[id]; ok {
+				return pattern, true, nil
 			}
 			// If not in Patterns but in Defs, compile it. compilePattern
 			// registers the pattern in c.icon.Patterns before recursing into
 			// its children, so cyclic references resolve safely.
 			defs, hasDefs := c.icon.Defs[id]
 			if hasDefs && len(defs) > 0 && defs[0].Tag == "pattern" {
-				p, err := c.compilePattern(defs)
-				if err == nil {
-					return p, true
+				p, cerr := c.compilePattern(defs)
+				if cerr != nil {
+					return nil, false, cerr
 				}
+				return p, true, nil
 			}
 		}
 	}
-	return nil, false
+	return nil, false, nil
+}
+
+// ReadPatternURL parses an SVG pattern url reference. It is a thin wrapper over
+// readPatternURL that preserves the historical (pattern, ok) signature; any
+// compile error is dropped (ok == false).
+func (c *IconCursor) ReadPatternURL(v string) (pattern *Pattern, ok bool) {
+	pattern, ok, _ = c.readPatternURL(v)
+	return
 }
 
 // fragmentPPEM returns a clamped, font-size-derived ppem for a fragment. The
@@ -757,118 +1424,50 @@ func fragmentPPEM(fontSize float64) fixed.Int26_6 {
 	return fixed.Int26_6(fontSize * 64)
 }
 
-// compileText lays out text fragments, computes text-anchor alignments,
-// extracts sfnt glyph vector outlines, and appends compound paths.
-func (c *IconCursor) compileText() error {
-	if len(c.textFragments) == 0 {
-		return nil
-	}
+// glyphVisit is one resolved glyph produced by walkTextGlyphs. penX/penY is the
+// pen position (in user units) at which the glyph is placed: horizontal kerning
+// has already been applied but the glyph's own advance has not. font/idx/ppem
+// identify the glyph and the size to load or measure it at. idx == 0 is the
+// .notdef glyph (used when neither the fragment's own font nor any fallback has
+// the rune) and is drawn/advanced like any other glyph rather than skipped.
+type glyphVisit struct {
+	frag       *textFragment
+	font       *sfnt.Font
+	idx        sfnt.GlyphIndex
+	ppem       fixed.Int26_6
+	penX, penY float64
+}
 
-	var penX, penY float64
-	var fontBuf sfnt.Buffer
+// registryFont returns the font registered under name, or nil, holding the
+// registry read lock for the lookup.
+func registryFont(name string) *sfnt.Font {
+	fontRegistryMu.RLock()
+	defer fontRegistryMu.RUnlock()
+	return fontRegistry[name]
+}
+
+// walkTextGlyphs is the single glyph iterator shared by compileText's
+// measurement and layout passes, so the two can never disagree on advances,
+// kerning, flag-ligature pairing, or fallback. It seeds the pen at
+// (startX+shiftX, startY), then for each fragment applies its x/y/dx/dy (dx/dy
+// exactly once — fixing the historical double-application of the first
+// fragment's dx/dy), resolves each rune to a glyph (regional-indicator flag
+// ligature -> per-rune fallback font -> .notdef), applies kerning, calls visit
+// with the pen position BEFORE the glyph's advance, then advances the pen. The
+// advance always comes from GlyphAdvance — including for bitmap/sbix glyphs —
+// so a measurement walk (no-op visit) and a layout walk stay in lockstep. It
+// returns the pen position after the last glyph so callers can thread the
+// baseline (y) and running x across chunks.
+func (c *IconCursor) walkTextGlyphs(frags []textFragment, startX, startY, shiftX float64,
+	buf *sfnt.Buffer, visit func(glyphVisit)) (endX, endY float64) {
+
+	penX := startX + shiftX
+	penY := startY
 	var prevIdx sfnt.GlyphIndex
 	var prevFont *sfnt.Font
 
-	// 1. Calculate total width of the text layout
-	var totalWidth float64
-	startX := c.textFragments[0].x + c.textFragments[0].dx
-	penX = startX
-
-	for _, frag := range c.textFragments {
-		fontObj := lookupFont(frag.style.FontFamily, frag.style.FontWeight)
-		if fontObj == nil {
-			continue
-		}
-
-		if frag.hasX {
-			penX = frag.x
-		}
-		if frag.hasY {
-			penY = frag.y
-		}
-		penX += frag.dx
-		penY += frag.dy
-
-		ppem := fragmentPPEM(frag.style.FontSize)
-
-		if fontObj != prevFont {
-			prevIdx = 0
-			prevFont = fontObj
-		}
-
-		runes := []rune(frag.text)
-		for i := 0; i < len(runes); i++ {
-			r := runes[i]
-			fontObjToUse := fontObj
-			var idx sfnt.GlyphIndex
-			var err error
-
-			isFlag := false
-			if i+1 < len(runes) && r >= regionalIndicatorBase && r <= regionalIndicatorEnd && runes[i+1] >= regionalIndicatorBase && runes[i+1] <= regionalIndicatorEnd {
-				code := string(rune(r-regionalIndicatorBase+'A')) + string(rune(runes[i+1]-regionalIndicatorBase+'A'))
-				fontRegistryMu.RLock()
-				emojiFont := fontRegistry["emoji"]
-				fontRegistryMu.RUnlock()
-				if emojiFont != nil {
-					if gIdx, ok := resolveFlagGlyph(code, emojiFont, &fontBuf); ok {
-						fontObjToUse = emojiFont
-						idx = gIdx
-						isFlag = true
-						i++
-					}
-				}
-			}
-
-			if !isFlag {
-				idx, err = fontObjToUse.GlyphIndex(&fontBuf, r)
-				if err != nil || idx == 0 {
-					if f, fallbackIdx := resolveFallbackGlyph(r); f != nil {
-						fontObjToUse = f
-						idx = fallbackIdx
-					}
-				}
-			}
-
-			if fontObjToUse != prevFont {
-				prevIdx = 0
-				prevFont = fontObjToUse
-			}
-
-			// Kerning
-			if prevIdx != 0 && idx != 0 {
-				kern, err := fontObjToUse.Kern(&fontBuf, prevIdx, idx, ppem, font.HintingNone)
-				if err == nil {
-					penX += float64(kern) / 64
-				}
-			}
-
-			if idx != 0 {
-				adv, err := fontObjToUse.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
-				if err == nil {
-					penX += float64(adv) / 64
-				}
-				prevIdx = idx
-			}
-		}
-	}
-	totalWidth = penX - startX
-
-	anchor := c.textFragments[0].style.TextAnchor
-	var shiftX float64
-	if anchor == "middle" {
-		shiftX = -totalWidth / 2
-	} else if anchor == "end" {
-		shiftX = -totalWidth
-	}
-
-	// 2. Perform layout and build glyph paths
-	penX = startX + shiftX
-	penY = c.textFragments[0].y + c.textFragments[0].dy
-
-	prevIdx = 0
-	prevFont = nil
-
-	for _, frag := range c.textFragments {
+	for fi := range frags {
+		frag := &frags[fi]
 		fontObj := lookupFont(frag.style.FontFamily, frag.style.FontWeight)
 		if fontObj == nil {
 			continue
@@ -890,24 +1489,20 @@ func (c *IconCursor) compileText() error {
 			prevFont = fontObj
 		}
 
-		var fragPath rasterx.Path
-
 		runes := []rune(frag.text)
 		for i := 0; i < len(runes); i++ {
 			r := runes[i]
-			fontObjToUse := fontObj
+			useFont := fontObj
 			var idx sfnt.GlyphIndex
-			var err error
 
 			isFlag := false
-			if i+1 < len(runes) && r >= regionalIndicatorBase && r <= regionalIndicatorEnd && runes[i+1] >= regionalIndicatorBase && runes[i+1] <= regionalIndicatorEnd {
+			if i+1 < len(runes) &&
+				r >= regionalIndicatorBase && r <= regionalIndicatorEnd &&
+				runes[i+1] >= regionalIndicatorBase && runes[i+1] <= regionalIndicatorEnd {
 				code := string(rune(r-regionalIndicatorBase+'A')) + string(rune(runes[i+1]-regionalIndicatorBase+'A'))
-				fontRegistryMu.RLock()
-				emojiFont := fontRegistry["emoji"]
-				fontRegistryMu.RUnlock()
-				if emojiFont != nil {
-					if gIdx, ok := resolveFlagGlyph(code, emojiFont, &fontBuf); ok {
-						fontObjToUse = emojiFont
+				if emojiFont := registryFont("emoji"); emojiFont != nil {
+					if gIdx, ok := resolveFlagGlyph(code, emojiFont, buf); ok {
+						useFont = emojiFont
 						idx = gIdx
 						isFlag = true
 						i++
@@ -916,108 +1511,230 @@ func (c *IconCursor) compileText() error {
 			}
 
 			if !isFlag {
-				idx, err = fontObjToUse.GlyphIndex(&fontBuf, r)
-				if err != nil || idx == 0 {
+				gi, err := useFont.GlyphIndex(buf, r)
+				switch {
+				case err == nil && gi != 0:
+					idx = gi
+				default:
+					// Missing from the fragment's font: try the fallback chain,
+					// else fall back to the fragment font's .notdef (idx 0).
 					if f, fallbackIdx := resolveFallbackGlyph(r); f != nil {
-						fontObjToUse = f
+						useFont = f
 						idx = fallbackIdx
+					} else {
+						idx = 0
 					}
 				}
 			}
 
-			if fontObjToUse != prevFont {
+			if useFont != prevFont {
 				prevIdx = 0
-				prevFont = fontObjToUse
+				prevFont = useFont
 			}
 
-			// Kerning
+			// Kerning (skipped when either side is .notdef).
 			if prevIdx != 0 && idx != 0 {
-				kern, err := fontObjToUse.Kern(&fontBuf, prevIdx, idx, ppem, font.HintingNone)
-				if err == nil {
+				if kern, err := useFont.Kern(buf, prevIdx, idx, ppem, font.HintingNone); err == nil {
 					penX += float64(kern) / 64
 				}
 			}
 
-			if idx != 0 {
-				// Try drawing as bitmap/PNG first
-				bytesData, index := findFontBytesAndIndex(fontObjToUse)
-				var pngBytes []byte
-				var originX, originY, maxPPEM int
-				var parseErr error
-				if bytesData != nil {
-					pngBytes, originX, originY, maxPPEM, parseErr = parseSBIX(bytesData, index, int(idx))
-				}
-				if pngBytes != nil && parseErr == nil {
-					if img, decodeErr := png.Decode(bytes.NewReader(pngBytes)); decodeErr == nil {
-						scale := frag.style.FontSize / float64(maxPPEM)
-						tx := penX + float64(originX)*scale
-						ty := penY - (float64(originY)+float64(img.Bounds().Dy()))*scale
-						svgi := SvgImage{
-							Image:     img,
-							Transform: frag.style.mAdder.M.Translate(tx, ty).Scale(scale, scale),
-							Opacity:   frag.style.FillOpacity,
-						}
-						c.icon.SVGImages = append(c.icon.SVGImages, svgi)
+			visit(glyphVisit{frag: frag, font: useFont, idx: idx, ppem: ppem, penX: penX, penY: penY})
 
-						// Advance penX
-						adv, err := fontObjToUse.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
-						if err == nil {
-							penX += float64(adv) / 64
-						}
-						prevIdx = idx
-						continue // Skip vector path drawing!
-					}
-				}
-
-				segs, err := fontObjToUse.LoadGlyph(&fontBuf, idx, ppem, nil)
-				if err == nil {
-					fixedPenX := fixed.Int26_6(penX * 64)
-					fixedPenY := fixed.Int26_6(penY * 64)
-					// Each MoveTo starts a new contour; close the previous one
-					// so multi-contour glyphs (e.g. 'o', 'B') render correctly.
-					contourOpen := false
-					for _, seg := range segs {
-						args := seg.Args
-						for i := range args {
-							args[i].X += fixedPenX
-							args[i].Y += fixedPenY
-						}
-						switch seg.Op {
-						case sfnt.SegmentOpMoveTo:
-							if contourOpen {
-								fragPath.Stop(true)
-							}
-							fragPath.Start(args[0])
-							contourOpen = true
-						case sfnt.SegmentOpLineTo:
-							fragPath.Line(args[0])
-						case sfnt.SegmentOpQuadTo:
-							fragPath.QuadBezier(args[0], args[1])
-						case sfnt.SegmentOpCubeTo:
-							fragPath.CubeBezier(args[0], args[1], args[2])
-						}
-					}
-					if contourOpen {
-						fragPath.Stop(true)
-					}
-				}
-
-				adv, err := fontObjToUse.GlyphAdvance(&fontBuf, idx, ppem, font.HintingNone)
-				if err == nil {
-					penX += float64(adv) / 64
-				}
-				prevIdx = idx
+			if adv, err := useFont.GlyphAdvance(buf, idx, ppem, font.HintingNone); err == nil {
+				penX += float64(adv) / 64
 			}
+			prevIdx = idx
 		}
+	}
+	return penX, penY
+}
 
-		if len(fragPath) > 0 {
-			c.icon.SVGPaths = append(c.icon.SVGPaths, SvgPath{
-				PathStyle: frag.style,
-				Path:      fragPath,
-			})
+// textEmitter turns the glyphs of a chunk into SvgPaths (vector outlines,
+// accumulated per fragment so each keeps its own style) and SvgImages (color
+// bitmap / sbix glyphs). It is driven by walkTextGlyphs via emit; flush() must
+// be called after the walk to append the final fragment's accumulated outline.
+type textEmitter struct {
+	c        *IconCursor
+	buf      *sfnt.Buffer
+	curFrag  *textFragment
+	fragPath rasterx.Path
+}
+
+func (e *textEmitter) emit(g glyphVisit) {
+	if e.curFrag != nil && g.frag != e.curFrag {
+		e.flush()
+	}
+	e.curFrag = g.frag
+
+	// Bitmap-first: place a color bitmap (sbix) glyph if the font has one.
+	if bytesData, index := findFontBytesAndIndex(g.font); bytesData != nil {
+		if pngBytes, originX, originY, maxPPEM, err := parseSBIX(bytesData, index, int(g.idx)); err == nil && pngBytes != nil && maxPPEM > 0 {
+			if img, derr := png.Decode(bytes.NewReader(pngBytes)); derr == nil {
+				// Scale from the strike's native design size (maxPPEM) to the
+				// requested, already-clamped ppem — not the raw FontSize — so an
+				// out-of-range font-size cannot blow up the transform.
+				scale := (float64(g.ppem) / 64) / float64(maxPPEM)
+				tx := g.penX + float64(originX)*scale
+				ty := g.penY - (float64(originY)+float64(img.Bounds().Dy()))*scale
+				e.c.icon.SVGImages = append(e.c.icon.SVGImages, SvgImage{
+					Image:     img,
+					Transform: g.frag.style.mAdder.M.Translate(tx, ty).Scale(scale, scale),
+					Opacity:   g.frag.style.FillOpacity * g.frag.style.groupOpacity,
+					order:     e.c.icon.nextOrder(),
+				})
+				return
+			}
 		}
 	}
 
+	// Vector outline.
+	segs, err := g.font.LoadGlyph(e.buf, g.idx, g.ppem, nil)
+	if err != nil {
+		return
+	}
+	fixedPenX := fixed.Int26_6(g.penX * 64)
+	fixedPenY := fixed.Int26_6(g.penY * 64)
+	// Each MoveTo starts a new contour; close the previous one so multi-contour
+	// glyphs (e.g. 'o', 'B') render correctly.
+	contourOpen := false
+	for _, seg := range segs {
+		args := seg.Args
+		for i := range args {
+			args[i].X += fixedPenX
+			args[i].Y += fixedPenY
+		}
+		switch seg.Op {
+		case sfnt.SegmentOpMoveTo:
+			if contourOpen {
+				e.fragPath.Stop(true)
+			}
+			e.fragPath.Start(args[0])
+			contourOpen = true
+		case sfnt.SegmentOpLineTo:
+			e.fragPath.Line(args[0])
+		case sfnt.SegmentOpQuadTo:
+			e.fragPath.QuadBezier(args[0], args[1])
+		case sfnt.SegmentOpCubeTo:
+			e.fragPath.CubeBezier(args[0], args[1], args[2])
+		}
+	}
+	if contourOpen {
+		e.fragPath.Stop(true)
+	}
+}
+
+// flush appends the current fragment's accumulated outline (if any) as one
+// SvgPath carrying that fragment's style and a fresh draw-order stamp.
+func (e *textEmitter) flush() {
+	if len(e.fragPath) > 0 && e.curFrag != nil {
+		e.c.icon.SVGPaths = append(e.c.icon.SVGPaths, SvgPath{
+			PathStyle: e.curFrag.style,
+			Path:      e.fragPath,
+			order:     e.c.icon.nextOrder(),
+		})
+	}
+	e.fragPath = nil
+}
+
+// normalizeBlockWhitespace applies SVG cross-fragment whitespace trimming to a
+// text block (default xml:space): the leading spaces of the first non-empty
+// fragment and the trailing spaces of the last are dropped, and a space that
+// begins a fragment is dropped when the previous fragment already ended with one
+// (so whitespace straddling a fragment boundary collapses to a single space).
+// Per-chunk collapsing/newline removal already happened in appendTextChunk; this
+// only fixes up the seams between fragments.
+func normalizeBlockWhitespace(frags []textFragment) {
+	first, last := -1, -1
+	for i := range frags {
+		if frags[i].text != "" {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first == -1 {
+		return
+	}
+	frags[first].text = strings.TrimLeft(frags[first].text, " ")
+	frags[last].text = strings.TrimRight(frags[last].text, " ")
+
+	prevEndsSpace := false
+	for i := range frags {
+		if frags[i].text == "" {
+			continue
+		}
+		if prevEndsSpace && strings.HasPrefix(frags[i].text, " ") {
+			frags[i].text = frags[i].text[1:]
+		}
+		if frags[i].text != "" {
+			prevEndsSpace = strings.HasSuffix(frags[i].text, " ")
+		}
+	}
+}
+
+// compileText lays out the accumulated text fragments and appends the resulting
+// glyph outlines (SvgPaths) and color bitmaps (SvgImages) to the icon.
+//
+// Fragments are split into chunks at each fragment that carries an explicit x;
+// each chunk is measured and anchored (text-anchor) independently using its own
+// first fragment's anchor, then laid out. A single walkTextGlyphs iterator backs
+// both the measurement and layout passes so they cannot drift. The pen's x and
+// baseline y thread across chunks so a later chunk without an explicit y (or
+// with a cumulative dy) continues from the previous one.
+func (c *IconCursor) compileText() error {
+	if len(c.textFragments) == 0 {
+		return nil
+	}
+	// System/emoji fonts load lazily on the first text layout (see
+	// LoadSystemFonts) so importers that never render text don't pay the cost.
+	LoadSystemFonts()
+
+	frags := c.textFragments
 	c.textFragments = nil
+
+	normalizeBlockWhitespace(frags)
+
+	var buf sfnt.Buffer
+
+	// Seed the pen at the first fragment's x/y WITHOUT its dx/dy; walkTextGlyphs
+	// applies dx/dy inside the per-fragment loop exactly once.
+	penX := frags[0].x
+	penY := frags[0].y
+
+	for i := 0; i < len(frags); {
+		j := i + 1
+		for j < len(frags) && !frags[j].hasX {
+			j++
+		}
+		chunk := frags[i:j]
+
+		startX := penX
+		if chunk[0].hasX {
+			startX = chunk[0].x
+		}
+
+		// Measurement pass: chunk width is pen travel with no anchor shift.
+		mEndX, _ := c.walkTextGlyphs(chunk, startX, penY, 0, &buf, func(glyphVisit) {})
+		width := mEndX - startX
+
+		var shiftX float64
+		switch chunk[0].style.TextAnchor {
+		case "middle":
+			shiftX = -width / 2
+		case "end":
+			shiftX = -width
+		}
+
+		// Layout pass: emit glyphs at the anchored pen positions.
+		em := textEmitter{c: c, buf: &buf}
+		endX, endY := c.walkTextGlyphs(chunk, startX, penY, shiftX, &buf, em.emit)
+		em.flush()
+
+		penX, penY = endX, endY
+		i = j
+	}
+
 	return nil
 }

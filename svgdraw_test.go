@@ -198,10 +198,16 @@ func TestStrokeIcons(t *testing.T) {
 }
 
 func TestBadColor(t *testing.T) {
-	// Test error handling in parseClasses and parseAttrs
-	_, errSvg := ReadIcon("testdata/BadColor.svg", WarnErrorMode)
+	// BadColor.svg has an inline style with an invalid color (#B6B8E). Under the
+	// error-mode contract a bad style property aborts the parse in strict mode;
+	// warn/ignore modes log and skip it (see parser_core_test.go).
+	_, errSvg := ReadIcon("testdata/BadColor.svg", StrictErrorMode)
 	if errSvg == nil {
-		t.Error("failed to catch class defs error")
+		t.Error("failed to catch bad color in strict mode")
+	}
+	// In warn/ignore modes the bad property is skipped and the parse succeeds.
+	if _, errSvg := ReadIcon("testdata/BadColor.svg", IgnoreErrorMode); errSvg != nil {
+		t.Errorf("ignore mode should skip the bad color, got %v", errSvg)
 	}
 }
 
@@ -216,16 +222,21 @@ func TestTopLevelStyle(t *testing.T) {
 func TestClassesIcon(t *testing.T) {
 	SaveIcon(t, "testdata/TestClasses.svg")
 
-	// Test error handling in parseClasses and parseAttrs
-	_, errSvg := ReadIcon("testdata/TestClasses_bad1.svg", WarnErrorMode)
-	if errSvg == nil {
-		t.Error("failed to catch class defs error")
+	// Malformed class/attribute CSS is a style error: per the error-mode
+	// contract it aborts in strict mode and is logged+skipped (no error) in
+	// warn/ignore modes (see F7 and parser_core_test.go). bad1 has a missing
+	// rule brace; bad2 has an attribute with no colon.
+	for _, f := range []string{"testdata/TestClasses_bad1.svg", "testdata/TestClasses_bad2.svg"} {
+		if _, err := ReadIcon(f, StrictErrorMode); err == nil {
+			t.Errorf("%s: strict mode should catch the malformed CSS", f)
+		}
+		if _, err := ReadIcon(f, WarnErrorMode); err != nil {
+			t.Errorf("%s: warn mode should tolerate the malformed CSS, got %v", f, err)
+		}
+		if _, err := ReadIcon(f, IgnoreErrorMode); err != nil {
+			t.Errorf("%s: ignore mode should tolerate the malformed CSS, got %v", f, err)
+		}
 	}
-	_, errSvg = ReadIcon("testdata/TestClasses_bad2.svg", WarnErrorMode)
-	if errSvg == nil {
-		t.Error("failed to catch attribute format error")
-	}
-
 }
 
 func TestHSL(t *testing.T) {

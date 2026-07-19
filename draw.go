@@ -1,7 +1,7 @@
 // Copyright 2017 The oksvg Authors. All rights reserved.
 // created: 2/12/2017 by S.R.Wiley
 //
-// utils.go implements translation of an SVG2.0 path into a rasterx Path.
+// draw.go maps SVG element tags to the functions that compile them into paths.
 
 package oksvg
 
@@ -17,6 +17,11 @@ import (
 
 // svgFunc defines function interface to use as drawing implementation.
 type svgFunc func(c *IconCursor, attrs []xml.Attr) error
+
+// maxUseDepth caps <use> replay nesting so a pathologically deep (but acyclic)
+// chain of references cannot exhaust the goroutine stack. Cyclic references are
+// caught earlier by IconCursor.useActive; this is the belt-and-suspenders bound.
+const maxUseDepth = 40
 
 var (
 	drawFuncs = map[string]svgFunc{
@@ -190,7 +195,7 @@ var (
 				return err
 			}
 		}
-		if len(c.points) > 4 {
+		if len(c.points) >= 4 {
 			c.Path.Start(fixed.Point26_6{
 				X: fixed.Int26_6((c.points[0]) * 64),
 				Y: fixed.Int26_6((c.points[1]) * 64)})
@@ -204,7 +209,7 @@ var (
 	}
 	polygonF svgFunc = func(c *IconCursor, attrs []xml.Attr) error {
 		err := polylineF(c, attrs)
-		if len(c.points) > 4 {
+		if len(c.points) >= 4 {
 			c.Path.Stop(true)
 		}
 		return err
@@ -249,11 +254,10 @@ var (
 			switch attr.Name.Local {
 			case "id":
 				id := attr.Value
-				if len(id) >= 0 {
-					c.icon.Grads[id] = c.grad
-				} else {
+				if id == "" {
 					return errZeroLengthID
 				}
+				c.icon.Grads[id] = c.grad
 			case "x1":
 				c.grad.Points[0], err = readFraction(attr.Value)
 			case "y1":
@@ -281,11 +285,10 @@ var (
 			switch attr.Name.Local {
 			case "id":
 				id := attr.Value
-				if len(id) >= 0 {
-					c.icon.Grads[id] = c.grad
-				} else {
+				if id == "" {
 					return errZeroLengthID
 				}
+				c.icon.Grads[id] = c.grad
 			case "r":
 				c.grad.Points[4], err = readFraction(attr.Value)
 			case "cx":
@@ -363,14 +366,85 @@ var (
 		if !strings.HasPrefix(href, "#") {
 			return errors.New("only the ID CSS selector is supported")
 		}
-		defs, ok := c.icon.Defs[href[1:]]
+		id := href[1:]
+		defs, ok := c.icon.Defs[id]
 		if !ok {
 			return errors.New("href ID in use statement was not found in saved defs")
 		}
-		for _, def := range defs {
+		// Cyclic or too-deeply-nested <use> guard. A self-reference (#a->#a) or a
+		// mutual cycle (#a->#b->#a) would otherwise recurse until the goroutine
+		// stack overflows (an unrecoverable process crash). Route it through the
+		// error-mode policy instead: strict aborts, warn logs and skips, ignore
+		// skips silently.
+		if c.useActive == nil {
+			c.useActive = map[string]bool{}
+		}
+		if c.useActive[id] || c.useDepth >= maxUseDepth {
+			errStr := "cyclic or too-deeply-nested use reference: " + href
+			if c.ErrorMode == StrictErrorMode {
+				return errors.New(errStr)
+			} else if c.ErrorMode == WarnErrorMode {
+				log.Println(errStr)
+			}
+			return nil
+		}
+		c.useActive[id] = true
+		c.useDepth++
+		defer func() {
+			delete(c.useActive, id)
+			c.useDepth--
+		}()
+		// baseDepth is the StyleStack depth at entry (the <use> element's own
+		// style is already pushed). useF must be stack-neutral: it never pops
+		// below baseDepth (guarding against stray endg/endpattern markers in
+		// today's unbalanced def lists) and truncates any styles it leaked
+		// (e.g. a group whose matching endg is missing) on return. This keeps
+		// the outer </use> and </svg> pops from underflowing.
+		baseDepth := len(c.StyleStack)
+		defer func() {
+			if len(c.StyleStack) > baseDepth {
+				c.StyleStack = c.StyleStack[:baseDepth]
+			}
+		}()
+		for i := 0; i < len(defs); i++ {
+			def := defs[i]
 			if def.Tag == "endg" {
-				// pop style
-				c.StyleStack = c.StyleStack[:len(c.StyleStack)-1]
+				// pop style, but never below baseDepth (guards against
+				// unbalanced endg markers in the def list).
+				if len(c.StyleStack) > baseDepth {
+					c.StyleStack = c.StyleStack[:len(c.StyleStack)-1]
+				}
+				continue
+			}
+			if def.Tag == "pattern" {
+				// Pattern defs are tiled paint, not drawable content. Skip the
+				// whole pattern subtree up to its matching endpattern, tracking
+				// depth for nested patterns.
+				depth := 1
+				for i++; i < len(defs) && depth > 0; i++ {
+					switch defs[i].Tag {
+					case "pattern":
+						depth++
+					case "endpattern":
+						depth--
+					}
+				}
+				i-- // outer loop's i++ will step past the matched endpattern
+				continue
+			}
+			if def.Tag == "endpattern" {
+				// Stray marker (unbalanced list); ignore.
+				continue
+			}
+			switch def.Tag {
+			case "title", "desc", "defs", "style", "text", "tspan":
+				// These drawFuncs set stateful mode flags (inTitleText, inDefs,
+				// inDefsStyle, inText, ...) that are only cleared by the matching
+				// EndElement, which this flat replay loop never sees. Replaying one
+				// would leave its flag stuck on and swallow the document's later
+				// CharData (e.g. real <text> vanishing into Titles). They also carry
+				// no replayable geometry (CharData is never captured in def lists),
+				// so skip them entirely.
 				continue
 			}
 			if err = c.PushStyle(def.Attrs); err != nil {
@@ -384,7 +458,12 @@ var (
 				} else if c.ErrorMode == WarnErrorMode {
 					log.Println(errStr)
 				}
-				return nil
+				// Unknown tag: skip this element (pop the style we pushed) and
+				// keep processing the rest of the def list.
+				if len(c.StyleStack) > baseDepth {
+					c.StyleStack = c.StyleStack[:len(c.StyleStack)-1]
+				}
+				continue
 			}
 			if err := df(c, def.Attrs); err != nil {
 				return err
@@ -394,12 +473,18 @@ var (
 				//The cursor parsed a path from the xml element
 				pathCopy := make(rasterx.Path, len(c.Path))
 				copy(pathCopy, c.Path)
-				c.icon.SVGPaths = append(c.icon.SVGPaths, SvgPath{c.StyleStack[len(c.StyleStack)-1], pathCopy})
+				c.icon.SVGPaths = append(c.icon.SVGPaths, SvgPath{
+					PathStyle: c.StyleStack[len(c.StyleStack)-1],
+					Path:      pathCopy,
+					order:     c.icon.nextOrder(),
+				})
 				c.Path = c.Path[:0]
 			}
 			if def.Tag != "g" {
 				// pop style
-				c.StyleStack = c.StyleStack[:len(c.StyleStack)-1]
+				if len(c.StyleStack) > baseDepth {
+					c.StyleStack = c.StyleStack[:len(c.StyleStack)-1]
+				}
 			}
 		}
 		return nil

@@ -1,13 +1,11 @@
 //go:build linux
 
+// icon_cursor_linux.go lists common Linux system/emoji font locations.
+// Flag-ligature resolution is the shared no-op in icon_cursor_flags_stub.go.
+
 package oksvg
 
-import "golang.org/x/image/font/sfnt"
-
-var systemFonts = []struct {
-	name string
-	path string
-}{
+var systemFonts = []systemFontInfo{
 	{"arial", "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"},
 	{"arial-bold", "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf"},
 	{"arial black", "/usr/share/fonts/truetype/msttcorefonts/Arial_Black.ttf"},
@@ -16,14 +14,6 @@ var systemFonts = []struct {
 	{"impact-bold", "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf"},
 }
 
-var emojiFonts = []struct {
-	name string
-	path string
-	coll bool
-}{
+var emojiFonts = []emojiFontInfo{
 	{"emoji", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", false},
-}
-
-func resolveFlagGlyph(code string, emojiFont *sfnt.Font, buf *sfnt.Buffer) (sfnt.GlyphIndex, bool) {
-	return 0, false
 }
