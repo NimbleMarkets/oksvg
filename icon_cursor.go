@@ -335,6 +335,11 @@ type IconCursor struct {
 	// error-mode policy instead of recursing until the goroutine stack overflows.
 	useActive map[string]bool
 	useDepth  int
+	// useReplayed counts definition elements replayed through <use> over the
+	// whole document (see maxUseReplay); useBudgetSpent records that the
+	// budget was hit so warn mode logs it once rather than per frame.
+	useReplayed    int
+	useBudgetSpent bool
 }
 
 // ReadGradURL reads an SVG format gradient url

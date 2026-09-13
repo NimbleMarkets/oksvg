@@ -8,6 +8,7 @@ package oksvg
 
 import (
 	"encoding/xml"
+	"fmt"
 	"image"
 	"image/color"
 	"strings"
@@ -544,6 +545,56 @@ func TestPatternTitleDescNoPanic(t *testing.T) {
 				t.Errorf("pattern metadata leaked into the document: titles=%q descs=%q", icon.Titles, icon.Descriptions)
 			}
 		})
+	}
+}
+
+// exponentialUseSVG builds a "billion laughs" style document: level n is a
+// group containing two <use>s of level n-1, so a single top-level <use> expands
+// to 2^n rects while staying only n levels deep (well under maxUseDepth).
+func exponentialUseSVG(levels int) string {
+	var b strings.Builder
+	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg"><defs><g id="a0"><rect width="1" height="1"/></g>`)
+	for i := 1; i <= levels; i++ {
+		fmt.Fprintf(&b, `<g id="a%d"><use href="#a%d"/><use href="#a%d"/></g>`, i, i-1, i-1)
+	}
+	fmt.Fprintf(&b, `</defs><use href="#a%d"/></svg>`, levels)
+	return b.String()
+}
+
+// TestUseExpansionBudget: the depth cap alone does not bound <use> expansion;
+// sibling references fan out exponentially. A document-wide replay budget must
+// stop the expansion in every error mode, surfacing an error only in strict.
+func TestUseExpansionBudget(t *testing.T) {
+	svg := exponentialUseSVG(22) // 4M rects unbounded
+
+	icon, err, panicked := parse(t, svg, StrictErrorMode)
+	if panicked {
+		t.Fatal("strict: panicked")
+	}
+	if err == nil {
+		t.Error("strict: exponential use expansion should return an error")
+	}
+	if len(icon.SVGPaths) > maxUseReplay {
+		t.Errorf("strict: %d paths emitted, budget is %d", len(icon.SVGPaths), maxUseReplay)
+	}
+
+	for _, m := range []ErrorMode{IgnoreErrorMode, WarnErrorMode} {
+		icon, err, panicked := parse(t, svg, m)
+		if panicked {
+			t.Fatalf("mode %d: panicked", m)
+		}
+		if err != nil {
+			t.Errorf("mode %d: expansion should be truncated, not fail: %v", m, err)
+		}
+		if len(icon.SVGPaths) > maxUseReplay {
+			t.Errorf("mode %d: %d paths emitted, budget is %d", m, len(icon.SVGPaths), maxUseReplay)
+		}
+	}
+
+	// A modest, legitimate fan-out must be unaffected.
+	small, err, _ := parse(t, exponentialUseSVG(8), StrictErrorMode)
+	if err != nil || len(small.SVGPaths) != 256 {
+		t.Errorf("8-level use: paths=%d err=%v, want 256 paths and no error", len(small.SVGPaths), err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/srwiley/rasterx"
@@ -22,6 +23,14 @@ type svgFunc func(c *IconCursor, attrs []xml.Attr) error
 // chain of references cannot exhaust the goroutine stack. Cyclic references are
 // caught earlier by IconCursor.useActive; this is the belt-and-suspenders bound.
 const maxUseDepth = 40
+
+// maxUseReplay caps the total number of definition elements replayed through
+// <use> across one document. The depth cap alone does not bound expansion:
+// a chain of groups that each <use> the previous level twice fans out to 2^n
+// elements at only n levels deep (a 940-byte document produced 131k paths at
+// depth 17). Once the budget is spent every further replay stops in all error
+// modes; strict additionally reports it.
+const maxUseReplay = 100000
 
 // statefulDefTags are element tags whose drawFuncs set mode flags (inTitleText,
 // inDescText, inDefs, inDefsStyle, inText, ...) that are only cleared by the
@@ -425,6 +434,21 @@ var (
 		}()
 		for i := 0; i < len(defs); i++ {
 			def := defs[i]
+			c.useReplayed++
+			if c.useReplayed > maxUseReplay {
+				errStr := "use expansion exceeds replay budget of " +
+					strconv.Itoa(maxUseReplay) + " elements: " + href
+				if !c.useBudgetSpent {
+					c.useBudgetSpent = true
+					if c.ErrorMode == WarnErrorMode {
+						log.Println(errStr)
+					}
+				}
+				if c.ErrorMode == StrictErrorMode {
+					return errors.New(errStr)
+				}
+				return nil
+			}
 			if def.Tag == "endg" {
 				// pop style, but never below baseDepth (guards against
 				// unbalanced endg markers in the def list).
