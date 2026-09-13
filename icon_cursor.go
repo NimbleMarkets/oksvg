@@ -465,13 +465,16 @@ func (c *IconCursor) applyStylePairs(curStyle *PathStyle, pairs []string) error 
 		if k == "" {
 			continue
 		}
-		if err := c.readStyleAttr(curStyle, k, v); err != nil {
+		next := *curStyle
+		if err := c.readStyleAttr(&next, k, v); err != nil {
 			e := fmt.Sprintf("error parsing style property %q: %s", pair, err.Error())
 			if c.returnError(e) {
 				return errors.New(e)
 			}
 			// Non-strict: skip this property and keep the inherited value.
+			continue
 		}
+		*curStyle = next
 	}
 	return nil
 }
@@ -908,6 +911,14 @@ func (c *IconCursor) readEndElement(se xml.EndElement) error {
 	if len(c.StyleStack) > 1 {
 		c.StyleStack = c.StyleStack[:len(c.StyleStack)-1]
 	}
+	// Metadata inside gradients is dispatched even within a skipped pattern.
+	// Clear its mode before the skipped-subtree early return as well.
+	switch se.Name.Local {
+	case "title":
+		c.inTitleText = false
+	case "desc":
+		c.inDescText = false
+	}
 
 	// Unwind a skipped subtree (top-level pattern, etc.). Gradient ends (and
 	// stops) inside the subtree were dispatched, not counted, in
@@ -941,10 +952,6 @@ func (c *IconCursor) readEndElement(se xml.EndElement) error {
 	case "text":
 		c.inText = false
 		return c.compileText()
-	case "title":
-		c.inTitleText = false
-	case "desc":
-		c.inDescText = false
 	case "defs":
 		// Only the outermost </defs> flushes the collection and leaves defs mode.
 		if c.defsNesting > 0 {
@@ -1258,12 +1265,15 @@ func (c *IconCursor) adaptClasses(pathStyle *PathStyle, classNames []string) err
 			continue
 		}
 		for k, v := range attrMap {
-			if err := c.readStyleAttr(pathStyle, k, v); err != nil {
+			next := *pathStyle
+			if err := c.readStyleAttr(&next, k, v); err != nil {
 				e := fmt.Sprintf("error parsing class %q property %s:%s: %s", className, k, v, err.Error())
 				if c.returnError(e) {
 					return errors.New(e)
 				}
+				continue
 			}
+			*pathStyle = next
 		}
 	}
 	return nil
@@ -1349,6 +1359,12 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 		}
 
 		df, ok := drawFuncs[def.Tag]
+		if !ok && c.returnError("Cannot process svg element "+def.Tag) {
+			c.icon = origIcon
+			c.StyleStack = origStyleStack
+			c.Path = c.Path[:0]
+			return nil, errors.New("Cannot process svg element " + def.Tag)
+		}
 		if ok {
 			if err := df(c, def.Attrs); err != nil {
 				c.icon = origIcon
