@@ -172,6 +172,23 @@ This fork intentionally changed a few behaviors from upstream. If you're migrati
   aborts the parse on either kind of error; `WarnErrorMode` logs and continues; `IgnoreErrorMode`
   continues silently. Upstream's handling of style errors was inconsistent with its handling of
   unrecognized elements.
+* **`objectBoundingBox` gradients follow the shape's transform.** The gradient is laid out in
+  the element's own bounding box and then rotated/skewed/scaled with it, per the specification.
+  Previously it was fitted to the axis-aligned device-space extent, so a horizontal gradient on
+  a rotated rect stayed horizontal. As part of this the object bounding box is now the tight
+  geometry extent (curve extrema, not Bézier control points, and excluding the stroke), which
+  also repositions `objectBoundingBox` gradients on stroked curves and on arc-built ellipses.
+* **A forward-referenced `<pattern>` that fails to compile is an error in `StrictErrorMode`,**
+  the same as a pattern declared before its use. Previously the error was swallowed when the
+  pattern appeared later in the document than the element using it.
+* **Resource limits on untrusted input.** `<use>` expansion is bounded by a document-wide
+  replay budget (100,000 definition elements) in addition to the nesting-depth cap, since
+  sibling references can fan out exponentially at shallow depth; once spent, further `<use>`
+  replay stops (an error in `StrictErrorMode`, logged once in `WarnErrorMode`). `sbix` bitmap
+  glyphs larger than 1024 px on a side are skipped before decoding, so a registered font cannot
+  force an arbitrarily large PNG allocation; each distinct glyph is decoded once per document
+  and shared, and distinct glyphs are charged against a 32 Mpx per-document budget, beyond
+  which glyphs render as vector outlines.
 
 ## Known limitations
 
