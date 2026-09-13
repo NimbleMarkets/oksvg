@@ -519,6 +519,34 @@ func countPathOps(p rasterx.Path) (moves, lines int) {
 	return
 }
 
+// TestPatternTitleDescNoPanic: a <title>/<desc> inside a <pattern> ran titleF/
+// descF against compileDefs' temporary icon, appending to ITS Titles slice and
+// setting inTitleText/inDescText. After the original icon was restored the flag
+// stayed on, so the next CharData indexed the original (empty) Titles at [-1].
+func TestPatternTitleDescNoPanic(t *testing.T) {
+	cases := map[string]string{
+		"title": `<svg xmlns="http://www.w3.org/2000/svg"><defs><pattern id="p" width="2" height="2"><title>tile</title><rect width="2" height="2"/></pattern></defs><rect width="10" height="10" fill="url(#p)"/> </svg>`,
+		"desc":  `<svg xmlns="http://www.w3.org/2000/svg"><defs><pattern id="p" width="2" height="2"><desc>tile</desc><rect width="2" height="2"/></pattern></defs><rect width="10" height="10" fill="url(#p)"/> </svg>`,
+	}
+	for name, svg := range cases {
+		t.Run(name, func(t *testing.T) {
+			icon, err, panicked := parse(t, svg, StrictErrorMode)
+			if panicked {
+				t.Fatal("pattern metadata panicked the parser")
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(icon.SVGPaths) != 1 {
+				t.Errorf("got %d paths, want 1 (the pattern-filled rect)", len(icon.SVGPaths))
+			}
+			if len(icon.Titles) != 0 || len(icon.Descriptions) != 0 {
+				t.Errorf("pattern metadata leaked into the document: titles=%q descs=%q", icon.Titles, icon.Descriptions)
+			}
+		})
+	}
+}
+
 // TestObjectBoundingBoxGradientRotatesWithShape: an objectBoundingBox gradient
 // is defined in the shape's own (pre-transform) bounding box, so a horizontal
 // gradient on a rect rotated 90 degrees must render as a vertical gradient.

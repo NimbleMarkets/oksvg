@@ -1273,6 +1273,11 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 			}
 			continue
 		}
+		if statefulDefTags[def.Tag] {
+			// Never run titleF/descF & co. against the temporary icon: their
+			// mode flags would outlive the icon swap (see statefulDefTags).
+			continue
+		}
 
 		if err := c.PushStyle(def.Attrs); err != nil {
 			c.icon = origIcon

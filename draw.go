@@ -23,6 +23,23 @@ type svgFunc func(c *IconCursor, attrs []xml.Attr) error
 // caught earlier by IconCursor.useActive; this is the belt-and-suspenders bound.
 const maxUseDepth = 40
 
+// statefulDefTags are element tags whose drawFuncs set mode flags (inTitleText,
+// inDescText, inDefs, inDefsStyle, inText, ...) that are only cleared by the
+// matching EndElement. The flat replay loops in useF and compileDefs never see
+// end elements, so replaying one would leave its flag stuck on and swallow the
+// document's later CharData (real <text> vanishing into Titles) or, when the
+// replay ran against compileDefs' temporary icon, index the original icon's
+// empty Titles/Descriptions at [-1]. They also carry no replayable geometry
+// (CharData is never captured in def lists), so both loops skip them entirely.
+var statefulDefTags = map[string]bool{
+	"title": true,
+	"desc":  true,
+	"defs":  true,
+	"style": true,
+	"text":  true,
+	"tspan": true,
+}
+
 var (
 	drawFuncs = map[string]svgFunc{
 		"svg":            svgF,
@@ -436,15 +453,7 @@ var (
 				// Stray marker (unbalanced list); ignore.
 				continue
 			}
-			switch def.Tag {
-			case "title", "desc", "defs", "style", "text", "tspan":
-				// These drawFuncs set stateful mode flags (inTitleText, inDefs,
-				// inDefsStyle, inText, ...) that are only cleared by the matching
-				// EndElement, which this flat replay loop never sees. Replaying one
-				// would leave its flag stuck on and swallow the document's later
-				// CharData (e.g. real <text> vanishing into Titles). They also carry
-				// no replayable geometry (CharData is never captured in def lists),
-				// so skip them entirely.
+			if statefulDefTags[def.Tag] {
 				continue
 			}
 			if err = c.PushStyle(def.Attrs); err != nil {
