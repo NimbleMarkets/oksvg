@@ -2,7 +2,12 @@
 package oksvg
 
 import (
+	"bytes"
 	"encoding/binary"
+	"hash/crc32"
+	"image"
+	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -287,5 +292,103 @@ func TestParseSBIX_CacheByteIdentityGuard(t *testing.T) {
 	}
 	if ppem != 96 {
 		t.Errorf("stale strike reused for a different font: got ppem %d, want 96 (font96's own strike)", ppem)
+	}
+}
+
+// pngHeaderOnly returns the bytes of a PNG that declares a w x h IHDR but
+// carries no image data: png.DecodeConfig reports the size, while png.Decode
+// would allocate w*h*4 bytes for it before failing on the missing data.
+func pngHeaderOnly(w, h uint32) []byte {
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:], w)
+	binary.BigEndian.PutUint32(ihdr[4:], h)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 6 // RGBA
+	chunk := append([]byte("IHDR"), ihdr...)
+	var out []byte
+	out = append(out, 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n')
+	out = binary.BigEndian.AppendUint32(out, 13)
+	out = append(out, chunk...)
+	out = binary.BigEndian.AppendUint32(out, crc32.ChecksumIEEE(chunk))
+	return out
+}
+
+// encodedPNG returns a complete, valid w x h PNG.
+func encodedPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewNRGBA(image.Rect(0, 0, w, h))); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestDecodeBitmapGlyphRejectsHugeDimensions: sbix PNG data comes from the
+// registered font bytes, so the declared IHDR size is attacker-controlled. The
+// size gate must fire before png.Decode allocates. Complete, valid PNGs just
+// over the limit prove the gate (an unrestricted decoder accepts them), and the
+// error text distinguishes the gate from a decode failure on the header-only
+// case (an unrestricted decoder would reject that too, after allocating).
+func TestDecodeBitmapGlyphRejectsHugeDimensions(t *testing.T) {
+	wantGate := func(name string, img image.Image, err error) {
+		t.Helper()
+		if err == nil || img != nil {
+			t.Fatalf("%s: got img=%v err=%v, want rejection", name, img, err)
+		}
+		if !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("%s: rejected by %q, want the size gate, not the decoder", name, err)
+		}
+	}
+	img, err := decodeBitmapGlyph(encodedPNG(t, maxBitmapGlyphSide+1, 1))
+	wantGate("over-wide valid PNG", img, err)
+	img, err = decodeBitmapGlyph(encodedPNG(t, 1, maxBitmapGlyphSide+1))
+	wantGate("over-tall valid PNG", img, err)
+	img, err = decodeBitmapGlyph(pngHeaderOnly(30000, 30000)) // 3.6 GB RGBA if decoded
+	wantGate("huge header-only PNG", img, err)
+
+	img, err = decodeBitmapGlyph(encodedPNG(t, maxBitmapGlyphSide, 1))
+	if err != nil || img == nil || img.Bounds().Dx() != maxBitmapGlyphSide {
+		t.Errorf("at-limit PNG: img=%v err=%v, want accepted", img, err)
+	}
+	img, err = decodeBitmapGlyph(encodedPNG(t, 4, 4))
+	if err != nil || img == nil || img.Bounds().Dx() != 4 {
+		t.Errorf("small valid PNG: img=%v err=%v, want 4x4 image", img, err)
+	}
+}
+
+// TestBitmapGlyphCacheAndBudget: a glyph repeated in a document must decode
+// once and share the image; distinct glyphs are charged against a per-document
+// pixel budget, after which further bitmaps are refused (the caller then falls
+// back to the vector outline) so a text run cannot allocate without bound.
+func TestBitmapGlyphCacheAndBudget(t *testing.T) {
+	c := &IconCursor{}
+	c.bitmapPixelLimit = 2 * 16 * 16 // room for exactly two 16x16 glyphs
+	pngA := encodedPNG(t, 16, 16)
+
+	first, err := c.bitmapGlyph(nil, 7, pngA)
+	if err != nil || first == nil {
+		t.Fatalf("first decode: img=%v err=%v", first, err)
+	}
+	again, err := c.bitmapGlyph(nil, 7, pngA)
+	if err != nil || again != first {
+		t.Errorf("repeated glyph: img=%p err=%v, want the cached image %p", again, err, first)
+	}
+	if c.bitmapPixels != 16*16 {
+		t.Errorf("pixels charged = %d after one distinct glyph, want %d", c.bitmapPixels, 16*16)
+	}
+
+	if _, err := c.bitmapGlyph(nil, 8, pngA); err != nil {
+		t.Fatalf("second distinct glyph within budget: %v", err)
+	}
+	third, err := c.bitmapGlyph(nil, 9, pngA)
+	if err == nil || third != nil {
+		t.Errorf("third distinct glyph: img=%v err=%v, want budget refusal", third, err)
+	}
+	if c.bitmapPixels != 2*16*16 {
+		t.Errorf("refused glyph was charged: pixels=%d", c.bitmapPixels)
+	}
+	// Cached glyphs stay available after the budget is spent.
+	if img, err := c.bitmapGlyph(nil, 7, pngA); err != nil || img != first {
+		t.Errorf("cached glyph after budget spent: img=%p err=%v, want %p", img, err, first)
 	}
 }

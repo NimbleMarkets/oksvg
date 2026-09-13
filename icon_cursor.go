@@ -12,6 +12,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"image"
 	"image/color"
 	"image/png"
 	"log"
@@ -340,6 +341,19 @@ type IconCursor struct {
 	// budget was hit so warn mode logs it once rather than per frame.
 	useReplayed    int
 	useBudgetSpent bool
+	// bitmapCache shares one decoded sbix image per (font, glyph) across the
+	// document; bitmapPixels is the running total of pixels decoded for
+	// distinct glyphs, charged against bitmapPixelLimit (0 means
+	// maxBitmapGlyphPixels). See bitmapGlyph.
+	bitmapCache      map[bitmapGlyphKey]image.Image
+	bitmapPixels     int
+	bitmapPixelLimit int
+}
+
+// bitmapGlyphKey identifies a decoded sbix glyph within one document.
+type bitmapGlyphKey struct {
+	font *sfnt.Font
+	idx  sfnt.GlyphIndex
 }
 
 // ReadGradURL reads an SVG format gradient url
@@ -1444,6 +1458,68 @@ func (c *IconCursor) ReadPatternURL(v string) (pattern *Pattern, ok bool) {
 	return
 }
 
+// maxBitmapGlyphPixels bounds the total pixels decoded for distinct sbix
+// glyphs in one document (32 Mpx ≈ 128 MB of RGBA). Repeated glyphs are served
+// from the per-document cache and cost nothing further, so this is a limit on
+// distinct bitmaps; once spent, remaining glyphs fall back to their vector
+// outlines instead of allocating more.
+const maxBitmapGlyphPixels = 32 << 20
+
+// maxBitmapGlyphSide bounds the width and height of an sbix bitmap glyph.
+// Real color-emoji strikes top out at a few hundred pixels; the cap exists
+// because the PNG comes from the registered font bytes, so its declared IHDR
+// size is attacker-controlled and png.Decode allocates for it up front.
+const maxBitmapGlyphSide = 1024
+
+// decodeBitmapGlyph decodes an sbix PNG after checking its declared dimensions
+// against maxBitmapGlyphSide, so a font cannot make png.Decode allocate an
+// arbitrarily large image (the later drawing is allocation-free and the ppem
+// clamp only bounds the transform, neither of which protects this decode).
+func decodeBitmapGlyph(pngBytes []byte) (image.Image, error) {
+	cfg, err := png.DecodeConfig(bytes.NewReader(pngBytes))
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 ||
+		cfg.Width > maxBitmapGlyphSide || cfg.Height > maxBitmapGlyphSide {
+		return nil, fmt.Errorf("bitmap glyph %dx%d exceeds %d px limit", cfg.Width, cfg.Height, maxBitmapGlyphSide)
+	}
+	return png.Decode(bytes.NewReader(pngBytes))
+}
+
+// bitmapGlyph returns the decoded sbix image for (font, idx), decoding
+// pngBytes at most once per document and charging its pixels against the
+// document budget. A cached glyph is always returned; a new one is refused
+// (error) when it would exceed the budget or the per-glyph size cap, and the
+// caller then draws the vector outline instead.
+func (c *IconCursor) bitmapGlyph(fnt *sfnt.Font, idx sfnt.GlyphIndex, pngBytes []byte) (image.Image, error) {
+	key := bitmapGlyphKey{font: fnt, idx: idx}
+	if img, ok := c.bitmapCache[key]; ok {
+		return img, nil
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(pngBytes))
+	if err != nil {
+		return nil, err
+	}
+	limit := c.bitmapPixelLimit
+	if limit == 0 {
+		limit = maxBitmapGlyphPixels
+	}
+	if px := cfg.Width * cfg.Height; px < 0 || c.bitmapPixels+px > limit {
+		return nil, fmt.Errorf("bitmap glyph %dx%d exceeds the document budget of %d px", cfg.Width, cfg.Height, limit)
+	}
+	img, err := decodeBitmapGlyph(pngBytes)
+	if err != nil {
+		return nil, err
+	}
+	c.bitmapPixels += cfg.Width * cfg.Height
+	if c.bitmapCache == nil {
+		c.bitmapCache = map[bitmapGlyphKey]image.Image{}
+	}
+	c.bitmapCache[key] = img
+	return img, nil
+}
+
 // fragmentPPEM returns a clamped, font-size-derived ppem for a fragment. The
 // upper clamp keeps fixed.Int26_6 (int32) arithmetic inside sfnt safe from
 // overflow on attacker-controlled font-size values.
@@ -1603,7 +1679,7 @@ func (e *textEmitter) emit(g glyphVisit) {
 	// Bitmap-first: place a color bitmap (sbix) glyph if the font has one.
 	if bytesData, index := findFontBytesAndIndex(g.font); bytesData != nil {
 		if pngBytes, originX, originY, maxPPEM, err := parseSBIX(bytesData, index, int(g.idx)); err == nil && pngBytes != nil && maxPPEM > 0 {
-			if img, derr := png.Decode(bytes.NewReader(pngBytes)); derr == nil {
+			if img, derr := e.c.bitmapGlyph(g.font, g.idx, pngBytes); derr == nil {
 				// Scale from the strike's native design size (maxPPEM) to the
 				// requested, already-clamped ppem — not the raw FontSize — so an
 				// out-of-range font-size cannot blow up the transform.
