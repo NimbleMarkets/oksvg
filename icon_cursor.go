@@ -315,8 +315,10 @@ type IconCursor struct {
 	hasTextX, hasTextY                                   bool
 	// defDepth is the current nesting depth within <defs>; openDefs holds the
 	// collectors for every ID'd element currently open.
-	defDepth int
-	openDefs []*defCollector
+	defDepth              int
+	openDefs              []*defCollector
+	definitionEntries     int
+	definitionBudgetSpent bool
 	// defsNesting counts open <defs> elements. defs mode stays on until the
 	// outermost </defs>, so a nested </defs> can't prematurely flush the outer
 	// collection (which would render the outer defs' remaining children and drop
@@ -341,6 +343,8 @@ type IconCursor struct {
 	// budget was hit so warn mode logs it once rather than per frame.
 	useReplayed    int
 	useBudgetSpent bool
+	// patternDepth bounds acyclic paint-server compilation chains.
+	patternDepth int
 	// bitmapCache shares one decoded sbix image per (font, glyph) across the
 	// document; bitmapPixels is the running total of pixels decoded for
 	// distinct glyphs, charged against bitmapPixelLimit (0 means
@@ -830,6 +834,13 @@ func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
 				ID = attr.Value
 			}
 		}
+		copies := len(c.openDefs)
+		if ID != "" {
+			copies++
+		}
+		if ok, err := c.reserveDefinitions(copies); !ok {
+			return err
+		}
 		c.defDepth++
 		def := definition{ID: ID, Tag: name, Attrs: se.Attr}
 		// Every open collector contains this element's def (nested elements
@@ -921,7 +932,9 @@ func (c *IconCursor) readEndElement(se xml.EndElement) error {
 	// Gradient starts never incremented defDepth, so their ends must not
 	// decrement it.
 	if c.inDefs && name != "defs" && name != "radialGradient" && name != "linearGradient" && !c.inGrad {
-		c.endDefElement(name)
+		if err := c.endDefElement(name); err != nil {
+			return err
+		}
 	}
 
 	switch name {
@@ -966,11 +979,14 @@ func (c *IconCursor) readEndElement(se xml.EndElement) error {
 // <defs>. For a g/pattern end it appends a balancing endg/endpattern marker to
 // every still-open collector (each of which contains that start), then flushes
 // every collector opened at the current depth.
-func (c *IconCursor) endDefElement(tag string) {
+func (c *IconCursor) endDefElement(tag string) error {
 	if c.defDepth == 0 {
-		return
+		return nil
 	}
 	if tag == "g" || tag == "pattern" {
+		if ok, err := c.reserveDefinitions(len(c.openDefs)); !ok {
+			return err
+		}
 		marker := "endg"
 		if tag == "pattern" {
 			marker = "endpattern"
@@ -991,6 +1007,7 @@ func (c *IconCursor) endDefElement(tag string) {
 	}
 	c.openDefs = kept
 	c.defDepth--
+	return nil
 }
 
 // closeAllDefs flushes any collectors still open when </defs> is reached and
@@ -1373,6 +1390,11 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 // children are compiled, so cyclic references (P1 -> P1 or P1 -> P2 -> P1)
 // resolve to the in-progress pointer instead of recursing indefinitely.
 func (c *IconCursor) compilePattern(defs []definition) (*Pattern, error) {
+	if c.patternDepth >= maxPatternDepth {
+		return nil, fmt.Errorf("pattern reference exceeds nesting limit of %d", maxPatternDepth)
+	}
+	c.patternDepth++
+	defer func() { c.patternDepth-- }()
 	p := &Pattern{
 		Units:        "userSpaceOnUse",
 		ContentUnits: "userSpaceOnUse",

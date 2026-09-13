@@ -188,7 +188,13 @@ This fork intentionally changed a few behaviors from upstream. If you're migrati
   glyphs larger than 1024 px on a side are skipped before decoding, so a registered font cannot
   force an arbitrarily large PNG allocation; each distinct glyph is decoded once per document
   and shared, and distinct glyphs are charged against a 32 Mpx per-document budget, beyond
-  which glyphs render as vector outlines.
+  which glyphs render as vector outlines. Pattern references are capped at 40 levels during
+  compilation and drawing. Each `Draw` permits at most 1,024 pattern tiles and 32 Mpx of
+  cumulative tile allocation, with a 4,096 px per-axis tile cap. Patterns exceeding draw
+  limits paint transparent; excessive compilation depth follows the parser's error mode.
+  Definition storage is limited to 100,000 entries, counting copies in ancestor replay
+  lists. On exhaustion, strict mode errors; permissive modes discard incomplete definitions
+  and skip further definition collection while continuing to parse ordinary shapes.
 
 ## Known limitations
 

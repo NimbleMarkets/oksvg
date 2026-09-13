@@ -27,18 +27,17 @@ func (svgp *SvgPath) Draw(r *rasterx.Dasher, opacity float64) {
 
 // DrawTransformed draws the compiled SvgPath into the Dasher while applying transform t.
 func (svgp *SvgPath) DrawTransformed(r *rasterx.Dasher, opacity float64, t rasterx.Matrix2D) {
-	svgp.drawTransformedInternal(r, opacity, t, nil)
+	svgp.drawTransformedInternal(r, opacity, t, &patternRenderState{})
 }
 
 // drawTransformedInternal is the recursion-aware core of DrawTransformed. The
-// active set threads through nested *Pattern fills so pattern cycles are
-// detected per call-graph instead of via a shared mutable flag. active is nil
-// on the common (non-pattern) path and is allocated lazily only when a Pattern
-// paint is actually encountered.
+// state threads through nested *Pattern fills, bounding tile allocation and
+// recursion without mutating the shared icon. Its active map is allocated
+// lazily only when a Pattern paint is actually encountered.
 //
 // It never mutates svgp: the combined matrix lives in a local MatrixAdder, so
 // concurrent draws of the same SvgPath into separate targets are safe.
-func (svgp *SvgPath) drawTransformedInternal(r *rasterx.Dasher, opacity float64, t rasterx.Matrix2D, active map[*Pattern]bool) {
+func (svgp *SvgPath) drawTransformedInternal(r *rasterx.Dasher, opacity float64, t rasterx.Matrix2D, state *patternRenderState) {
 	// Local combined transform; never mutate svgp.mAdder (data race + retained
 	// Adder pointer).
 	madder := rasterx.MatrixAdder{M: t.Mult(svgp.mAdder.M)}
@@ -67,10 +66,7 @@ func (svgp *SvgPath) drawTransformedInternal(r *rasterx.Dasher, opacity float64,
 			}
 		case *Pattern:
 			if hasBounds {
-				if active == nil {
-					active = map[*Pattern]bool{}
-				}
-				rf.SetColor(fillerColor.getColorFunction(fillOpacity, userBounds, madder.M, active))
+				rf.SetColor(fillerColor.getColorFunction(fillOpacity, userBounds, madder.M, state))
 				rf.Draw()
 			}
 		}
@@ -109,10 +105,7 @@ func (svgp *SvgPath) drawTransformedInternal(r *rasterx.Dasher, opacity float64,
 			}
 		case *Pattern:
 			if hasBounds {
-				if active == nil {
-					active = map[*Pattern]bool{}
-				}
-				r.SetColor(linerColor.getColorFunction(lineOpacity, userBounds, madder.M, active))
+				r.SetColor(linerColor.getColorFunction(lineOpacity, userBounds, madder.M, state))
 				r.Draw()
 			}
 		}

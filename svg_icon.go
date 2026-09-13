@@ -42,6 +42,7 @@ func (s *SvgIcon) nextOrder() int {
 // are interleaved by their draw-order stamp so document z-order is preserved.
 // On equal or zero order, paths are drawn before images (legacy behavior).
 func (s *SvgIcon) Draw(r *rasterx.Dasher, opacity float64) {
+	patterns := &patternRenderState{}
 	pi, ii := 0, 0
 	for pi < len(s.SVGPaths) || ii < len(s.SVGImages) {
 		drawPath := false
@@ -55,7 +56,7 @@ func (s *SvgIcon) Draw(r *rasterx.Dasher, opacity float64) {
 			drawPath = s.SVGPaths[pi].order <= s.SVGImages[ii].order
 		}
 		if drawPath {
-			s.SVGPaths[pi].DrawTransformed(r, opacity, s.Transform)
+			s.SVGPaths[pi].drawTransformedInternal(r, opacity, s.Transform, patterns)
 			pi++
 		} else {
 			if s.DrawTarget != nil {
