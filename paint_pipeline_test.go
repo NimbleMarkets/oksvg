@@ -598,6 +598,27 @@ func TestUseExpansionBudget(t *testing.T) {
 	}
 }
 
+// TestForwardPatternStrictErrorPropagates: a pattern whose child fails to
+// compile errors in strict mode when declared before its use (readStyleAttr
+// path) but was silently accepted when declared after it, because the
+// finalize-time resolver went through ReadPatternURL, which drops the error.
+func TestForwardPatternStrictErrorPropagates(t *testing.T) {
+	backward := `<svg xmlns="http://www.w3.org/2000/svg"><defs><pattern id="p" width="2" height="2"><path d="M 0 0 L"/></pattern></defs><rect width="10" height="10" fill="url(#p)"/></svg>`
+	forward := `<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="url(#p)"/><defs><pattern id="p" width="2" height="2"><path d="M 0 0 L"/></pattern></defs></svg>`
+
+	if _, err, _ := parse(t, backward, StrictErrorMode); err == nil {
+		t.Fatal("backward reference: expected strict error (precondition)")
+	}
+	if _, err, _ := parse(t, forward, StrictErrorMode); err == nil {
+		t.Error("forward reference: pattern compile error was swallowed in strict mode")
+	}
+	for _, m := range []ErrorMode{IgnoreErrorMode, WarnErrorMode} {
+		if _, err, _ := parse(t, forward, m); err != nil {
+			t.Errorf("mode %d: forward bad pattern should not error: %v", m, err)
+		}
+	}
+}
+
 // TestObjectBoundingBoxGradientRotatesWithShape: an objectBoundingBox gradient
 // is defined in the shape's own (pre-transform) bounding box, so a horizontal
 // gradient on a rect rotated 90 degrees must render as a vertical gradient.

@@ -1111,7 +1111,9 @@ func (c *IconCursor) finalize() error {
 	// Forward paint references. Every gradient/pattern is known now, so resolve
 	// any fill/stroke that referenced one before it was declared. Unresolvable
 	// references keep the SVG "none" fallback (nil paint).
-	c.resolvePendingPaints(c.icon.SVGPaths)
+	if err := c.resolvePendingPaints(c.icon.SVGPaths); err != nil {
+		return err
+	}
 
 	// Pattern tile children can carry the same forward references (a tile shape
 	// filling url(#g) with g declared later). Resolving icon.SVGPaths alone left
@@ -1124,19 +1126,29 @@ func (c *IconCursor) finalize() error {
 		pats = append(pats, p)
 	}
 	for _, p := range pats {
-		c.resolvePendingPaints(p.Paths)
+		if err := c.resolvePendingPaints(p.Paths); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // resolvePendingPaints resolves every deferred fill/stroke url(#id) reference in
 // paths (see resolvePendingPaint). Unresolvable references fall back to none
-// (nil paint), logged in WarnErrorMode. It mutates paths in place.
-func (c *IconCursor) resolvePendingPaints(paths []SvgPath) {
+// (nil paint), logged in WarnErrorMode. A pattern that fails to compile is
+// routed through the error-mode policy exactly as a backward reference is in
+// readStyleAttr: strict returns the error, warn logs it, and both non-strict
+// modes fall back to none. It mutates paths in place.
+func (c *IconCursor) resolvePendingPaints(paths []SvgPath) error {
 	for i := range paths {
 		sp := &paths[i]
 		if sp.pendingFillURL != "" {
-			if paint, ok := c.resolvePendingPaint(sp.pendingFillURL, sp.fillerColor); ok {
+			paint, ok, err := c.resolvePendingPaint(sp.pendingFillURL, sp.fillerColor)
+			if err != nil {
+				if c.returnError("fill url(#" + sp.pendingFillURL + "): " + err.Error()) {
+					return err
+				}
+			} else if ok {
 				sp.fillerColor = paint
 			} else if c.ErrorMode == WarnErrorMode {
 				log.Println("fill url(#" + sp.pendingFillURL + ") never resolved to a gradient or pattern; falling back to none")
@@ -1144,7 +1156,12 @@ func (c *IconCursor) resolvePendingPaints(paths []SvgPath) {
 			sp.pendingFillURL = ""
 		}
 		if sp.pendingStrokeURL != "" {
-			if paint, ok := c.resolvePendingPaint(sp.pendingStrokeURL, sp.linerColor); ok {
+			paint, ok, err := c.resolvePendingPaint(sp.pendingStrokeURL, sp.linerColor)
+			if err != nil {
+				if c.returnError("stroke url(#" + sp.pendingStrokeURL + "): " + err.Error()) {
+					return err
+				}
+			} else if ok {
 				sp.linerColor = paint
 			} else if c.ErrorMode == WarnErrorMode {
 				log.Println("stroke url(#" + sp.pendingStrokeURL + ") never resolved to a gradient or pattern; falling back to none")
@@ -1152,20 +1169,26 @@ func (c *IconCursor) resolvePendingPaints(paths []SvgPath) {
 			sp.pendingStrokeURL = ""
 		}
 	}
+	return nil
 }
 
 // resolvePendingPaint resolves a deferred url(#id) paint reference to the final
 // gradient (localized against defaultColor, as ReadGradURL does) or pattern.
-// It reports whether the id resolved.
-func (c *IconCursor) resolvePendingPaint(id string, defaultColor interface{}) (interface{}, bool) {
+// It reports whether the id resolved; a non-nil error means the id named a
+// pattern whose children failed to compile.
+func (c *IconCursor) resolvePendingPaint(id string, defaultColor interface{}) (interface{}, bool, error) {
 	url := "url(#" + id + ")"
 	if grad, ok := c.ReadGradURL(url, defaultColor); ok {
-		return grad, true
+		return grad, true, nil
 	}
-	if pat, ok := c.ReadPatternURL(url); ok {
-		return pat, true
+	pat, ok, err := c.readPatternURL(url)
+	if err != nil {
+		return nil, false, err
 	}
-	return nil, false
+	if ok {
+		return pat, true, nil
+	}
+	return nil, false, nil
 }
 
 // resolveGradStops follows an xlink:href chain (cycle-guarded, depth <= 8) to
