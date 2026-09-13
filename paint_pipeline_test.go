@@ -331,8 +331,9 @@ func TestTwoPointPolylineProducesLine(t *testing.T) {
 	}
 }
 
-// TestPathBounds verifies the user-space bounding box walk, including control
-// points and the empty-path case.
+// TestPathBounds verifies the user-space bounding box walk: the empty-path
+// case, a polyline, and that curve extents are exact rather than the control
+// hull (the SVG object bounding box excludes control points).
 func TestPathBounds(t *testing.T) {
 	var p rasterx.Path
 	if _, ok := pathBounds(p); ok {
@@ -352,7 +353,9 @@ func TestPathBounds(t *testing.T) {
 		t.Errorf("bounds = %+v, want {X:10 Y:20 W:30 H:40}", b)
 	}
 
-	// Cubic control points must widen the (conservative) bounds.
+	// Cubic (0,0) -> (50,50) with handles (100,-50) and (200,150): the control
+	// hull is {0,-50,200,200} but the curve itself only reaches
+	// x = 126.49 (t = sqrt(0.4)) and y in [-8.168, 78.416] (t = 0.1144, 0.7947).
 	var q rasterx.Path
 	q.Start(fixed.Point26_6{X: 0, Y: 0})
 	q.CubeBezier(
@@ -363,8 +366,34 @@ func TestPathBounds(t *testing.T) {
 	if !ok {
 		t.Fatal("cubic path should report ok=true")
 	}
-	if b2.X != 0 || b2.Y != -50 || b2.W != 200 || b2.H != 200 {
-		t.Errorf("cubic bounds = %+v, want {X:0 Y:-50 W:200 H:200}", b2)
+	want := ObjectBounds{X: 0, Y: -8.16794, W: 126.49111, H: 86.58381}
+	near := func(a, b float64) bool { return a-b < 1e-4 && b-a < 1e-4 }
+	if !near(b2.X, want.X) || !near(b2.Y, want.Y) || !near(b2.W, want.W) || !near(b2.H, want.H) {
+		t.Errorf("cubic bounds = %+v, want %+v (tight curve extent, not control hull)", b2, want)
+	}
+
+	// Closing a subpath moves the current point back to its start, so a curve
+	// that follows Z starts from (0,0), not from the last vertex (100,100).
+	// Cubic (0,0) -> (0,0) with both handles at (-40,0) reaches x = -30 (t=0.5);
+	// from (100,100) it would only reach about x = -23.
+	var z rasterx.Path
+	z.Start(fixed.Point26_6{X: 0, Y: 0})
+	z.Line(fixed.Point26_6{X: 100 * 64, Y: 0})
+	z.Line(fixed.Point26_6{X: 100 * 64, Y: 100 * 64})
+	z.Stop(true)
+	z.CubeBezier(fixed.Point26_6{X: -40 * 64, Y: 0}, fixed.Point26_6{X: -40 * 64, Y: 0}, fixed.Point26_6{X: 0, Y: 0})
+	bz, _ := pathBounds(z)
+	if !near(bz.X, -30) || !near(bz.W, 130) {
+		t.Errorf("bounds after Z = %+v, want X=-30 W=130 (curve must start at the subpath origin)", bz)
+	}
+
+	// Quadratic (0,0) -> (100,0) with handle (50,100) peaks at y = 50 (t = 0.5).
+	var r rasterx.Path
+	r.Start(fixed.Point26_6{X: 0, Y: 0})
+	r.QuadBezier(fixed.Point26_6{X: 50 * 64, Y: 100 * 64}, fixed.Point26_6{X: 100 * 64, Y: 0})
+	b3, _ := pathBounds(r)
+	if b3.X != 0 || b3.Y != 0 || b3.W != 100 || b3.H != 50 {
+		t.Errorf("quad bounds = %+v, want {X:0 Y:0 W:100 H:50}", b3)
 	}
 }
 
@@ -488,4 +517,39 @@ func countPathOps(p rasterx.Path) (moves, lines int) {
 		}
 	}
 	return
+}
+
+// TestObjectBoundingBoxGradientRotatesWithShape: an objectBoundingBox gradient
+// is defined in the shape's own (pre-transform) bounding box, so a horizontal
+// gradient on a rect rotated 90 degrees must render as a vertical gradient.
+// Building it from the device-space extent instead kept it horizontal.
+func TestObjectBoundingBoxGradientRotatesWithShape(t *testing.T) {
+	const svg = `<svg width="10" height="20" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><rect width="20" height="10" transform="translate(10 0) rotate(90)" fill="url(#g)"/></svg>`
+	icon, err := ReadIconStream(strings.NewReader(svg), StrictErrorMode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 10, 20))
+	scanner := rasterx.NewScannerGV(10, 20, img, img.Bounds())
+	icon.Draw(rasterx.NewDasher(10, 20, scanner), 1)
+
+	// The rect's x axis (gradient direction) now points down the page.
+	if r, _, b, _ := rgba8(img, 5, 2); r <= b {
+		t.Errorf("top (5,2) = r%d b%d, want red-leaning", r, b)
+	}
+	if r, _, b, _ := rgba8(img, 5, 17); b <= r {
+		t.Errorf("bottom (5,17) = r%d b%d, want blue-leaning", r, b)
+	}
+	lr, _, lb, _ := rgba8(img, 2, 10)
+	rr, _, rb, _ := rgba8(img, 7, 10)
+	if absInt(int(lr)-int(rr)) > 8 || absInt(int(lb)-int(rb)) > 8 {
+		t.Errorf("left (2,10) = r%d b%d vs right (7,10) = r%d b%d: gradient still varies horizontally", lr, lb, rr, rb)
+	}
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
