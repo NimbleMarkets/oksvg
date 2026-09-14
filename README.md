@@ -154,6 +154,10 @@ This fork intentionally changed a few behaviors from upstream. If you're migrati
 
 * **Default `stroke-width` is now `1.0`**, matching the SVG specification's initial value.
   Upstream defaulted to `2.0`.
+* **Default `stroke-linejoin` is now `miter`**, matching the SVG specification's initial value
+  (with the default `stroke-miterlimit` of `4`). Upstream defaulted to `bevel`, which chamfered
+  every stroked corner that did not set `stroke-linejoin` explicitly
+  ([srwiley/oksvg#52](https://github.com/srwiley/oksvg/issues/52)).
 * **`SvgIcon.SetTarget` now correctly accounts for a non-zero `viewBox` origin** (`viewBox="x
   y w h"` with `x`/`y` != 0). Upstream ignored the origin, which shifted content for icons
   using such a viewBox.

@@ -653,3 +653,28 @@ func absInt(v int) int {
 	}
 	return v
 }
+
+// TestDefaultLineJoinIsMiter checks that a stroke without an explicit
+// stroke-linejoin uses the SVG initial value, miter, rather than bevel.
+// A mitered 90-degree corner paints the outer corner of the stroke; a
+// beveled one chamfers it, leaving that pixel empty.
+// See https://github.com/srwiley/oksvg/issues/52.
+func TestDefaultLineJoinIsMiter(t *testing.T) {
+	if DefaultStyle.LineJoin != rasterx.Miter {
+		t.Errorf("DefaultStyle.LineJoin = %v, want rasterx.Miter", DefaultStyle.LineJoin)
+	}
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <rect x="20" y="20" width="60" height="60" fill="none" stroke="#000" stroke-width="8"/>
+</svg>`
+	img := renderSVG(t, svg, 100, 100, IgnoreErrorMode)
+	// The stroke's outer edge is at x=16,y=16; (17,17) is inside a mitered
+	// corner but outside the 45-degree bevel between (16,24) and (24,16).
+	if _, _, _, a := rgba8(img, 17, 17); a == 0 {
+		t.Errorf("outer corner (17,17) is unpainted: default stroke-linejoin is bevel, want miter")
+	}
+	// Explicit bevel still chamfers the corner.
+	bevel := renderSVG(t, strings.Replace(svg, `stroke-width="8"`, `stroke-width="8" stroke-linejoin="bevel"`, 1), 100, 100, IgnoreErrorMode)
+	if _, _, _, a := rgba8(bevel, 17, 17); a != 0 {
+		t.Errorf("explicit stroke-linejoin=bevel painted the outer corner (alpha %d), want 0", a)
+	}
+}

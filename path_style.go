@@ -42,7 +42,7 @@ type PathStyle struct {
 type styleAttribute = map[string]string
 
 // DefaultStyle sets the default PathStyle to fill black, winding rule,
-// full opacity, no stroke, ButtCap line end and Bevel line connect, with default font settings.
+// full opacity, no stroke, ButtCap line end and Miter line connect, with default font settings.
 var DefaultStyle = PathStyle{
 	FillOpacity:       1.0,
 	LineOpacity:       1.0,
@@ -52,7 +52,7 @@ var DefaultStyle = PathStyle{
 	UseNonZeroWinding: true,
 	fillerColor:       color.NRGBA{0x00, 0x00, 0x00, 0xff},
 	LineCap:           rasterx.ButtCap,
-	LineJoin:          rasterx.Bevel,
+	LineJoin:          rasterx.Miter, // SVG spec initial stroke-linejoin (was Bevel; see srwiley/oksvg#52)
 	mAdder:            rasterx.MatrixAdder{M: rasterx.Identity},
 	FontFamily:        "sans-serif",
 	FontSize:          12.0,
