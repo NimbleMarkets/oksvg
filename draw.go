@@ -109,9 +109,14 @@ var (
 				c.icon.ViewBox.W = c.points[2]
 				c.icon.ViewBox.H = c.points[3]
 			case "width":
-				width, err = parseFloat(attr.Value, 64)
+				// A percentage of an unknown container names no size here.
+				if !strings.HasSuffix(strings.TrimSpace(attr.Value), "%") {
+					width, err = parseFloat(attr.Value, 64)
+				}
 			case "height":
-				height, err = parseFloat(attr.Value, 64)
+				if !strings.HasSuffix(strings.TrimSpace(attr.Value), "%") {
+					height, err = parseFloat(attr.Value, 64)
+				}
 			}
 			if err != nil {
 				return err
@@ -132,17 +137,17 @@ var (
 		for _, attr := range attrs {
 			switch attr.Name.Local {
 			case "x":
-				x, err = parseFloat(attr.Value, 64)
+				x, err = c.readLength(attr.Value, horizontal)
 			case "y":
-				y, err = parseFloat(attr.Value, 64)
+				y, err = c.readLength(attr.Value, vertical)
 			case "width":
-				w, err = parseFloat(attr.Value, 64)
+				w, err = c.readLength(attr.Value, horizontal)
 			case "height":
-				h, err = parseFloat(attr.Value, 64)
+				h, err = c.readLength(attr.Value, vertical)
 			case "rx":
-				rx, err = parseFloat(attr.Value, 64)
+				rx, err = c.readLength(attr.Value, horizontal)
 			case "ry":
-				ry, err = parseFloat(attr.Value, 64)
+				ry, err = c.readLength(attr.Value, vertical)
 			}
 			if err != nil {
 				return err
@@ -160,16 +165,16 @@ var (
 		for _, attr := range attrs {
 			switch attr.Name.Local {
 			case "cx":
-				cx, err = parseFloat(attr.Value, 64)
+				cx, err = c.readLength(attr.Value, horizontal)
 			case "cy":
-				cy, err = parseFloat(attr.Value, 64)
+				cy, err = c.readLength(attr.Value, vertical)
 			case "r":
-				rx, err = parseFloat(attr.Value, 64)
+				rx, err = c.readLength(attr.Value, other)
 				ry = rx
 			case "rx":
-				rx, err = parseFloat(attr.Value, 64)
+				rx, err = c.readLength(attr.Value, horizontal)
 			case "ry":
-				ry, err = parseFloat(attr.Value, 64)
+				ry, err = c.readLength(attr.Value, vertical)
 			}
 			if err != nil {
 				return err
@@ -187,13 +192,13 @@ var (
 		for _, attr := range attrs {
 			switch attr.Name.Local {
 			case "x1":
-				x1, err = parseFloat(attr.Value, 64)
+				x1, err = c.readLength(attr.Value, horizontal)
 			case "x2":
-				x2, err = parseFloat(attr.Value, 64)
+				x2, err = c.readLength(attr.Value, horizontal)
 			case "y1":
-				y1, err = parseFloat(attr.Value, 64)
+				y1, err = c.readLength(attr.Value, vertical)
 			case "y2":
-				y2, err = parseFloat(attr.Value, 64)
+				y2, err = c.readLength(attr.Value, vertical)
 			}
 			if err != nil {
 				return err
@@ -375,9 +380,9 @@ var (
 			case "href":
 				href = attr.Value
 			case "x":
-				x, err = parseFloat(attr.Value, 64)
+				x, err = c.readLength(attr.Value, horizontal)
 			case "y":
-				y, err = parseFloat(attr.Value, 64)
+				y, err = c.readLength(attr.Value, vertical)
 			}
 			if err != nil {
 				return err
@@ -538,15 +543,15 @@ func readTextCoordAttrs(c *IconCursor, attrs []xml.Attr) error {
 	for _, attr := range attrs {
 		switch attr.Name.Local {
 		case "x":
-			c.textX, err = parseFloat(attr.Value, 64)
+			c.textX, err = c.readLength(attr.Value, horizontal)
 			c.hasTextX = true
 		case "y":
-			c.textY, err = parseFloat(attr.Value, 64)
+			c.textY, err = c.readLength(attr.Value, vertical)
 			c.hasTextY = true
 		case "dx":
-			c.textDx, err = parseFloat(attr.Value, 64)
+			c.textDx, err = c.readLength(attr.Value, horizontal)
 		case "dy":
-			c.textDy, err = parseFloat(attr.Value, 64)
+			c.textDy, err = c.readLength(attr.Value, vertical)
 		}
 		if err != nil {
 			return err
