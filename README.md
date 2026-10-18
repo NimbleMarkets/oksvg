@@ -133,6 +133,33 @@ that overlaps or follows a `<text>` run z-orders correctly against it.
 Rendered pattern tiles are capped at 4096 px per axis regardless of the SVG's requested
 scale, to bound memory use against adversarial input.
 
+### Markers (`<marker>`)
+
+`marker-start`, `marker-mid`, `marker-end`, and the `marker` shorthand draw a `<marker>`'s
+content at the vertices of `<path>`, `<line>`, `<polyline>`, and `<polygon>` elements, so
+arrowheads drawn as markers (as diagram renderers such as go-mermaid and Graphviz emit) appear.
+Supported:
+
+* `viewBox`, `refX`/`refY`, `markerWidth`/`markerHeight`, and `preserveAspectRatio="none"`
+  (otherwise the content scales uniformly).
+* `markerUnits` of `strokeWidth` (the default) or `userSpaceOnUse`.
+* `orient` of `auto`, `auto-start-reverse`, or an angle in degrees, `deg`, `rad`, `grad`, or
+  `turn`. `auto` follows the path's direction, including Bézier tangents, and bisects the turn
+  at interior vertices; a closed subpath joins its ends.
+* A `<marker>` outside `<defs>` is a definition, never drawn where it appears.
+
+Markers are placed when the referencing element is parsed. Marker placement adds at most 100,000
+paths per document; over budget, strict mode reports an error and other modes stop adding
+markers.
+
+### Percentage lengths
+
+Shape geometry (`x`, `y`, `width`, `height`, `cx`, `cy`, `r`, `rx`, `ry`, `x1`…`y2`), `<use>`
+offsets, and text positions accept percentages of the root viewport: its width for horizontal
+lengths, its height for vertical ones, and the normalized diagonal for `r`. A
+`<rect width="100%" height="100%">` background now fills the image instead of being dropped.
+A percentage `width`/`height` on the root `<svg>` leaves the `viewBox` in charge.
+
 ### Thread-safety
 
 * **After this fork's concurrency fixes, calling `SvgIcon.Draw` concurrently from multiple
@@ -215,6 +242,10 @@ This fork intentionally changed a few behaviors from upstream. If you're migrati
   above); there is no general `morx`/ligature-table parser, so a future macOS font update
   that changes glyph IDs will fall back to per-rune flag rendering until this fork's table is
   refreshed.
+* **Markers are not clipped to their viewport** (`overflow` is treated as `visible`), a
+  marker referenced before its `<marker>` element is read is not drawn, and markers on shapes
+  inside marker content are not drawn. Text inside a marker is ignored.
+* **Percentage lengths resolve against the root viewport**, not the nearest nested `<svg>`.
 * **`x`, `y`, `dx`, `dy` on `<text>`/`<tspan>` accept a single value**, not the SVG-legal
   space/comma-separated list that positions individual characters.
 
