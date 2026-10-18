@@ -478,8 +478,13 @@ var (
 				i-- // outer loop's i++ will step past the matched endpattern
 				continue
 			}
-			if def.Tag == "endpattern" {
+			if def.Tag == "endpattern" || def.Tag == "endmarker" {
 				// Stray marker (unbalanced list); ignore.
+				continue
+			}
+			if def.Tag == "marker" {
+				// A marker is a definition, not content: skip its span.
+				i = skipSpan(defs, i, "marker", "endmarker")
 				continue
 			}
 			if statefulDefTags[def.Tag] {
@@ -506,17 +511,8 @@ var (
 			if err := df(c, def.Attrs); err != nil {
 				return err
 			}
-			//Did c.Path get added to during the drawFunction call iteration?
-			if len(c.Path) > 0 {
-				//The cursor parsed a path from the xml element
-				pathCopy := make(rasterx.Path, len(c.Path))
-				copy(pathCopy, c.Path)
-				c.icon.SVGPaths = append(c.icon.SVGPaths, SvgPath{
-					PathStyle: c.StyleStack[len(c.StyleStack)-1],
-					Path:      pathCopy,
-					order:     c.icon.nextOrder(),
-				})
-				c.Path = c.Path[:0]
+			if err := c.emitPath(def.Tag); err != nil {
+				return err
 			}
 			if def.Tag != "g" {
 				// pop style

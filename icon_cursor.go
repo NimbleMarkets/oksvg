@@ -352,6 +352,15 @@ type IconCursor struct {
 	bitmapCache      map[bitmapGlyphKey]image.Image
 	bitmapPixels     int
 	bitmapPixelLimit int
+	// markers caches compiled <marker> definitions by id (nil: not drawable).
+	// markerDepth is non-zero while marker content compiles; markerPaths and
+	// markerBudgetSpent account for maxMarkerPaths. markerDefs counts <marker>
+	// elements outside <defs>, which are collected as if they were inside.
+	markers           map[string]*compiledMarker
+	markerDepth       int
+	markerPaths       int
+	markerBudgetSpent bool
+	markerDefs        int
 }
 
 // bitmapGlyphKey identifies a decoded sbix glyph within one document.
@@ -787,6 +796,21 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 		curStyle.TextAnchor = v
 	case "font-weight":
 		curStyle.FontWeight = v
+	case "marker-start", "marker-mid", "marker-end", "marker":
+		id, err := readMarkerRef(v)
+		if err != nil {
+			return err
+		}
+		switch k {
+		case "marker-start":
+			curStyle.markerStart = id
+		case "marker-mid":
+			curStyle.markerMid = id
+		case "marker-end":
+			curStyle.markerEnd = id
+		default: // the shorthand sets all three
+			curStyle.markerStart, curStyle.markerMid, curStyle.markerEnd = id, id, id
+		}
 	}
 	return nil
 }
@@ -824,6 +848,13 @@ func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
 		c.defsNesting++
 		c.inDefs = true
 		return nil
+	}
+
+	// A <marker> is never drawn where it appears; it is a definition wherever
+	// it is. Outside <defs>, collect it as if it were inside.
+	if name == "marker" && !c.inDefs && !c.inGrad {
+		c.markerDefs++
+		c.inDefs = true
 	}
 
 	// Gradient elements (and their stops) are not part of the flat defs model;
@@ -888,17 +919,11 @@ func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
 		err = nil
 	}
 
-	if len(c.Path) > 0 {
-		//The cursor parsed a path from the xml element
-		pathCopy := make(rasterx.Path, len(c.Path))
-		copy(pathCopy, c.Path)
-		c.icon.SVGPaths = append(c.icon.SVGPaths,
-			SvgPath{
-				PathStyle: c.StyleStack[len(c.StyleStack)-1],
-				Path:      pathCopy,
-				order:     c.icon.nextOrder(),
-			})
-		c.Path = c.Path[:0]
+	if err := c.emitPath(name); err != nil {
+		e := fmt.Sprintf("error drawing markers on svg element %s: %s", name, err.Error())
+		if c.returnError(e) {
+			return errors.New(e)
+		}
 	}
 	return
 }
@@ -946,6 +971,12 @@ func (c *IconCursor) readEndElement(se xml.EndElement) error {
 		if err := c.endDefElement(name); err != nil {
 			return err
 		}
+		// The end of a <marker> collected outside <defs> ends its collection.
+		if name == "marker" && c.markerDefs > 0 && c.defDepth == 0 && c.defsNesting == 0 {
+			c.markerDefs--
+			c.closeAllDefs()
+			c.inDefs = false
+		}
 	}
 
 	switch name {
@@ -990,13 +1021,16 @@ func (c *IconCursor) endDefElement(tag string) error {
 	if c.defDepth == 0 {
 		return nil
 	}
-	if tag == "g" || tag == "pattern" {
+	if tag == "g" || tag == "pattern" || tag == "marker" {
 		if ok, err := c.reserveDefinitions(len(c.openDefs)); !ok {
 			return err
 		}
 		marker := "endg"
-		if tag == "pattern" {
+		switch tag {
+		case "pattern":
 			marker = "endpattern"
+		case "marker":
+			marker = "endmarker"
 		}
 		for _, col := range c.openDefs {
 			if col.openDepth <= c.defDepth {
@@ -1332,8 +1366,13 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 			i-- // outer loop's i++ steps past the matched endpattern
 			continue
 		}
-		if def.Tag == "endpattern" {
+		if def.Tag == "endpattern" || def.Tag == "endmarker" {
 			// This pattern's own closing marker (or a stray one); ignore.
+			continue
+		}
+		if def.Tag == "marker" {
+			// A marker is a definition, not content: skip its span.
+			i = skipSpan(defs, i, "marker", "endmarker")
 			continue
 		}
 		if def.Tag == "endg" {
@@ -1377,15 +1416,10 @@ func (c *IconCursor) compileDefs(defs []definition) ([]SvgPath, error) {
 			}
 		}
 
-		if len(c.Path) > 0 {
-			pathCopy := make(rasterx.Path, len(c.Path))
-			copy(pathCopy, c.Path)
-			c.icon.SVGPaths = append(c.icon.SVGPaths, SvgPath{
-				PathStyle: c.StyleStack[len(c.StyleStack)-1],
-				Path:      pathCopy,
-				order:     c.icon.nextOrder(),
-			})
-			c.Path = c.Path[:0]
+		if err := c.emitPath(def.Tag); err != nil {
+			c.icon = origIcon
+			c.StyleStack = origStyleStack
+			return nil, err
 		}
 
 		if def.Tag != "g" {

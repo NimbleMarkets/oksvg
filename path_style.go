@@ -36,6 +36,9 @@ type PathStyle struct {
 	// references for forward-declared gradients/patterns. Reserved for a later
 	// wave; declared here so the field layout is stable.
 	pendingFillURL, pendingStrokeURL string
+	// markerStart, markerMid, and markerEnd are the ids of the markers drawn
+	// at a shape's vertices; empty means none. They inherit.
+	markerStart, markerMid, markerEnd string
 }
 
 // styleAttribute describes draw options, such as {"fill":"black"; "stroke":"white"}.
