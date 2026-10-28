@@ -9,7 +9,8 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Use Intel macOS while hosted ARM64 runners have capacity constraints.
+        os: [ubuntu-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out code
