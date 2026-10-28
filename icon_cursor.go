@@ -442,7 +442,11 @@ func (c *IconCursor) PushStyle(attrs []xml.Attr) error {
 		}
 	}
 	// Make a copy of the top style.
-	curStyle := c.StyleStack[len(c.StyleStack)-1]
+	parentStyle := c.StyleStack[len(c.StyleStack)-1]
+	curStyle := parentStyle
+	// Display is not inherited. Cascade this element's declarations first;
+	// ancestor suppression is applied only after the local cascade is complete.
+	curStyle.displayNone = false
 
 	// Lowest precedence: class selectors, in listed order.
 	if err := c.adaptClasses(&curStyle, classNames); err != nil {
@@ -457,6 +461,7 @@ func (c *IconCursor) PushStyle(attrs []xml.Attr) error {
 		return err
 	}
 
+	curStyle.displayNone = parentStyle.displayNone || curStyle.displayNone
 	c.StyleStack = append(c.StyleStack, curStyle) // Push style onto stack
 	return nil
 }
@@ -588,9 +593,15 @@ func (c *IconCursor) parseTransformFrom(v string, m1 rasterx.Matrix2D) (rasterx.
 func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 	switch k {
 	case "display":
-		curStyle.displayNone = curStyle.displayNone || strings.TrimSpace(v) == "none"
+		curStyle.displayNone = v == "none"
+		if v == "inherit" && len(c.StyleStack) > 0 {
+			curStyle.displayNone = c.StyleStack[len(c.StyleStack)-1].displayNone
+		}
 	case "visibility":
 		curStyle.visibilityHidden = v == "hidden" || v == "collapse"
+		if v == "inherit" && len(c.StyleStack) > 0 {
+			curStyle.visibilityHidden = c.StyleStack[len(c.StyleStack)-1].visibilityHidden
+		}
 	case "fill":
 		// Any explicit fill supersedes an inherited unresolved paint ref.
 		curStyle.pendingFillURL = ""

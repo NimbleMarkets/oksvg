@@ -11,6 +11,15 @@ import (
 
 // imageF resolves raster content exclusively from the caller's allowlist.
 func imageF(c *IconCursor, attrs []xml.Attr) error {
+	// Pattern and marker compilers retain vector paths only. Report this
+	// limitation before resolving a resource that would otherwise be discarded.
+	if c.patternDepth > 0 || c.markerDepth > 0 {
+		err := fmt.Errorf("SVG image elements inside patterns or markers are unsupported")
+		if c.returnError(err.Error()) {
+			return err
+		}
+		return nil
+	}
 	style := c.StyleStack[len(c.StyleStack)-1]
 	if style.displayNone || style.visibilityHidden {
 		return nil
@@ -50,8 +59,11 @@ func imageF(c *IconCursor, attrs []xml.Attr) error {
 	if href == "" {
 		href = src
 	}
+	if w < 0 || h < 0 {
+		return fmt.Errorf("SVG image width and height must be non-negative")
+	}
 	img := c.images[href]
-	if img == nil || w <= 0 || h <= 0 {
+	if img == nil || w == 0 || h == 0 {
 		return nil
 	}
 	b := img.Bounds()

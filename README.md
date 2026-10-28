@@ -138,6 +138,24 @@ icon.Draw(raster, 1.0)
 Paths and bitmap glyphs are interleaved in the SVG's document order when drawn, so a path
 that overlaps or follows a `<text>` run z-orders correctly against it.
 
+### Explicit SVG image resources
+
+`ReadIconStreamWithImages(reader, images, errorMode...)` accepts a map of already
+decoded `image.Image` values keyed by `<image href>` (also `xlink:href` and legacy
+`src`). It performs no network or filesystem access and no data URL decoding.
+The regular `ReadIconStream` does not load image resources. Keep supplied images
+and the map immutable during parsing; keep images immutable while drawing.
+
+Images support explicit dimensions, positioning, inherited transforms and
+opacity, display/visibility, and `preserveAspectRatio` (`none`, `meet`, `slice`).
+Each decoded image is capped at 4096 pixels per edge and 4 Mi pixels total.
+Set `SvgIcon.DrawTarget` to the same image used by the rasterizer so bitmap images
+and vector paths are composited in document order.
+
+Images inside patterns and markers are unsupported: strict mode reports an error;
+warning and ignore modes skip those images while retaining vector content.
+Negative image dimensions are errors; zero dimensions skip drawing.
+
 ### Patterns (`<pattern>`)
 
 `<pattern>` elements declared in `<defs>` are supported, including:
@@ -249,8 +267,9 @@ This fork intentionally changed a few behaviors from upstream. If you're migrati
 
 ## Known limitations
 
-* **No `<image>` element.** Embedding external or data-URI raster images via `<image>` is not
-  implemented; only bitmap glyphs sourced from font `sbix` tables are composited.
+* **`<image>` requires host-supplied resources** via `ReadIconStreamWithImages`. The
+  parser does not fetch files or URLs or decode data URIs. Images inside patterns and
+  markers are unsupported.
 * **Group opacity is approximated per-primitive, not true group compositing.** A `<g
   opacity="0.5">` multiplies its descendants' own fill/stroke opacity rather than rendering the
   group to an offscreen buffer and compositing that as a whole; overlapping shapes within the
@@ -294,17 +313,3 @@ example icons shown below, which are also used as test icons in the `testdata` f
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).
-
-### Explicit SVG image resources
-
-`ReadIconStreamWithImages(reader, images, errorMode...)` accepts a map of already
-decoded `image.Image` values keyed by `<image href>` (also `xlink:href` and legacy
-`src`). It performs no network or filesystem access and no data URL decoding.
-The regular `ReadIconStream` does not load image resources. Keep supplied images
-and the map immutable during parsing; keep images immutable while drawing.
-
-Images support explicit dimensions, positioning, inherited transforms and
-opacity, display/visibility, and `preserveAspectRatio` (`none`, `meet`, `slice`).
-Each decoded image is capped at 4096 pixels per edge and 4 Mi pixels total.
-Set `SvgIcon.DrawTarget` to the same image used by the rasterizer so bitmap images
-and vector paths are composited in document order.
