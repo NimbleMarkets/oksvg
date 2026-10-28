@@ -1,5 +1,5 @@
 // Copyright 2018 The oksvg Authors. All rights reserved.
-package oksvg_test
+package oksvg
 
 import (
 	"image"
@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/NimbleMarkets/oksvg"
 	. "github.com/srwiley/rasterx"
 )
 

@@ -31,7 +31,7 @@
 // Verify against the checked-in goldens (normal CI mode):
 //
 //	go test -run TestGoldenRender
-package oksvg_test
+package oksvg
 
 import (
 	"flag"
@@ -43,7 +43,6 @@ import (
 	"strings"
 	"testing"
 
-	. "github.com/NimbleMarkets/oksvg"
 	. "github.com/srwiley/rasterx"
 )
 

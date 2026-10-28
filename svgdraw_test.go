@@ -1,6 +1,6 @@
 // Copyright 2018 The oksvg Authors. All rights reserved.
 // created: 2018 by S.R.Wiley
-package oksvg_test
+package oksvg
 
 import (
 	"bufio"
@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	. "github.com/NimbleMarkets/oksvg"
 	. "github.com/srwiley/rasterx"
 	//"github.com/srwiley/go/scanFT"
 )

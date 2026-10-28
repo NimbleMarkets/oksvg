@@ -32,6 +32,26 @@ Go modules resolve the rest of the dependency graph (`github.com/srwiley/rasterx
 `golang.org/x/image`, `golang.org/x/net`) automatically; no manual `go get` of transitive
 packages is required.
 
+### Replacing upstream oksvg
+
+Starting with the planned **v0.1.3** release, applications that import
+`github.com/srwiley/oksvg` can use this fork without changing their imports:
+
+```go
+replace github.com/srwiley/oksvg => github.com/NimbleMarkets/oksvg v0.1.3
+```
+
+The compatibility fix moves the fork's external tests into `package oksvg` and
+removes their self-import of `github.com/NimbleMarkets/oksvg`. This prevents
+`go mod tidy` in consumers such as nttypeset from loading the same fork version
+under both module paths. The module declaration, production imports, public API,
+test assertions, and golden images are unchanged. Direct imports of
+`github.com/NimbleMarkets/oksvg` continue to work.
+
+Version v0.1.3 must be tagged and published before consumers can pin the replacement
+above; v0.1.2 does not include this fix. To try an unreleased checkout, replace
+`github.com/srwiley/oksvg` with its local directory instead.
+
 ## What this fork adds
 
 ### Text (`<text>` / `<tspan>`)
