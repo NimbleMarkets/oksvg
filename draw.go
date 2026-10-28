@@ -52,6 +52,7 @@ var statefulDefTags = map[string]bool{
 var (
 	drawFuncs = map[string]svgFunc{
 		"svg":            svgF,
+		"image":          imageF,
 		"g":              gF,
 		"line":           lineF,
 		"stop":           stopF,

@@ -294,3 +294,17 @@ example icons shown below, which are also used as test icons in the `testdata` f
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).
+
+### Explicit SVG image resources
+
+`ReadIconStreamWithImages(reader, images, errorMode...)` accepts a map of already
+decoded `image.Image` values keyed by `<image href>` (also `xlink:href` and legacy
+`src`). It performs no network or filesystem access and no data URL decoding.
+The regular `ReadIconStream` does not load image resources. Keep supplied images
+and the map immutable during parsing; keep images immutable while drawing.
+
+Images support explicit dimensions, positioning, inherited transforms and
+opacity, display/visibility, and `preserveAspectRatio` (`none`, `meet`, `slice`).
+Each decoded image is capped at 4096 pixels per edge and 4 Mi pixels total.
+Set `SvgIcon.DrawTarget` to the same image used by the rasterizer so bitmap images
+and vector paths are composited in document order.

@@ -304,6 +304,7 @@ type gradHrefLink struct {
 
 // IconCursor is used while parsing SVG files.
 type IconCursor struct {
+	images map[string]image.Image
 	PathCursor
 	icon                                                 *SvgIcon
 	StyleStack                                           []PathStyle
@@ -586,6 +587,10 @@ func (c *IconCursor) parseTransformFrom(v string, m1 rasterx.Matrix2D) (rasterx.
 
 func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 	switch k {
+	case "display":
+		curStyle.displayNone = curStyle.displayNone || strings.TrimSpace(v) == "none"
+	case "visibility":
+		curStyle.visibilityHidden = v == "hidden" || v == "collapse"
 	case "fill":
 		// Any explicit fill supersedes an inherited unresolved paint ref.
 		curStyle.pendingFillURL = ""

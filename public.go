@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"image"
 	"image/color"
 	"io"
 	"math"
@@ -29,8 +30,15 @@ import (
 // if it does not handle an element found in the icon file. Ignore warnings is
 // the default if no ErrorMode value is provided.
 func ReadIconStream(stream io.Reader, errMode ...ErrorMode) (*SvgIcon, error) {
+	return ReadIconStreamWithImages(stream, nil, errMode...)
+}
+
+// ReadIconStreamWithImages permits only already-decoded images in the supplied
+// allowlist, keyed by href. It never reads files, fetches URLs, or decodes data URLs.
+// The caller must keep images immutable while the icon is in use.
+func ReadIconStreamWithImages(stream io.Reader, images map[string]image.Image, errMode ...ErrorMode) (*SvgIcon, error) {
 	icon := &SvgIcon{Defs: make(map[string][]definition), Grads: make(map[string]*rasterx.Gradient), Patterns: make(map[string]*Pattern), Transform: rasterx.Identity}
-	cursor := &IconCursor{StyleStack: []PathStyle{DefaultStyle}, icon: icon}
+	cursor := &IconCursor{StyleStack: []PathStyle{DefaultStyle}, icon: icon, images: images}
 	if len(errMode) > 0 {
 		cursor.ErrorMode = errMode[0]
 	}

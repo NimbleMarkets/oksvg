@@ -13,6 +13,7 @@ import (
 
 // PathStyle holds the state of the SVG style.
 type PathStyle struct {
+	displayNone, visibilityHidden     bool
 	FillOpacity, LineOpacity          float64
 	LineWidth, DashOffset, MiterLimit float64
 	Dash                              []float64

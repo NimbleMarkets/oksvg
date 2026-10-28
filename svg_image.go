@@ -12,6 +12,7 @@ import (
 
 // SvgImage represents a parsed bitmap glyph/image and its transform/opacity properties.
 type SvgImage struct {
+	viewport  *imageViewport
 	Image     image.Image
 	Transform rasterx.Matrix2D
 	Opacity   float64
@@ -48,5 +49,42 @@ func (svgi *SvgImage) DrawTransformed(dst draw.Image, opacity float64, t rasterx
 	if op < 1 {
 		opts = &xdraw.Options{SrcMask: image.NewUniform(color.Alpha{A: uint8(op*255 + 0.5)}), SrcMaskP: image.Point{}}
 	}
+	if v := svgi.viewport; v != nil {
+		m := t.Mult(v.transform)
+		det := m.A*m.D - m.B*m.C
+		if det == 0 {
+			return
+		}
+		inv := rasterx.Matrix2D{A: m.D / det, B: -m.B / det, C: -m.C / det, D: m.A / det, E: (m.C*m.F - m.D*m.E) / det, F: (m.B*m.E - m.A*m.F) / det}
+		if opts == nil {
+			opts = &xdraw.Options{}
+		}
+		opts.DstMask = &imageViewportMask{bounds: dst.Bounds(), inverse: inv, viewport: *v}
+	}
 	xdraw.BiLinear.Transform(dst, aff, svgi.Image, svgi.Image.Bounds(), xdraw.Over, opts)
+}
+
+// A transformed viewport clips slice images without allocating an intermediate
+// bitmap, even for large scales or rotated image elements.
+type imageViewport struct {
+	x, y, w, h float64
+	transform  rasterx.Matrix2D
+}
+type imageViewportMask struct {
+	bounds   image.Rectangle
+	inverse  rasterx.Matrix2D
+	viewport imageViewport
+}
+
+func (*imageViewportMask) ColorModel() color.Model   { return color.AlphaModel }
+func (m *imageViewportMask) Bounds() image.Rectangle { return m.bounds }
+func (m *imageViewportMask) At(x, y int) color.Color {
+	fx, fy := float64(x)+0.5, float64(y)+0.5
+	u := m.inverse.A*fx + m.inverse.C*fy + m.inverse.E
+	v := m.inverse.B*fx + m.inverse.D*fy + m.inverse.F
+	r := m.viewport
+	if u >= r.x && u < r.x+r.w && v >= r.y && v < r.y+r.h {
+		return color.Alpha{A: 255}
+	}
+	return color.Alpha{}
 }
