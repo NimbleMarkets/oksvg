@@ -57,7 +57,7 @@ func (svgp *SvgPath) drawTransformedInternal(r *rasterx.Dasher, opacity float64,
 		fillOpacity := clamp01(svgp.FillOpacity * svgp.groupOpacity * opacity)
 		switch fillerColor := svgp.fillerColor.(type) {
 		case color.Color:
-			rf.SetColor(rasterx.ApplyOpacity(fillerColor, fillOpacity))
+			rf.SetColor(solidColorOpacity(fillerColor, fillOpacity))
 			rf.Draw()
 		case rasterx.Gradient:
 			if hasBounds {
@@ -96,7 +96,7 @@ func (svgp *SvgPath) drawTransformedInternal(r *rasterx.Dasher, opacity float64,
 		lineOpacity := clamp01(svgp.LineOpacity * svgp.groupOpacity * opacity)
 		switch linerColor := svgp.linerColor.(type) {
 		case color.Color:
-			r.SetColor(rasterx.ApplyOpacity(linerColor, lineOpacity))
+			r.SetColor(solidColorOpacity(linerColor, lineOpacity))
 			r.Draw()
 		case rasterx.Gradient:
 			if hasBounds {
@@ -331,4 +331,12 @@ func (svgp *SvgPath) SetFillColor(clr color.Color) {
 // SetLineColor sets the line color of the SvgPath
 func (svgp *SvgPath) SetLineColor(clr color.Color) {
 	svgp.linerColor = clr
+}
+
+// solidColorOpacity multiplies intrinsic alpha by paint opacity without
+// mistaking premultiplied RGB channels for straight (NRGBA) channels.
+func solidColorOpacity(c color.Color, opacity float64) color.NRGBA {
+	n := color.NRGBAModel.Convert(c).(color.NRGBA)
+	n.A = uint8(float64(n.A) * clamp01(opacity))
+	return n
 }
