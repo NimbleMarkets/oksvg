@@ -178,21 +178,6 @@ func RegisterFontCollection(family string, collectionBytes []byte) error {
 	return nil
 }
 
-func resolveFallbackGlyph(r rune) (*sfnt.Font, sfnt.GlyphIndex) {
-	fontRegistryMu.RLock()
-	defer fontRegistryMu.RUnlock()
-
-	var fontBuf sfnt.Buffer
-	for _, name := range []string{"emoji", "emoji-0", "emoji-1", "symbols", "default"} {
-		if f, ok := fontRegistry[name]; ok {
-			if idx, err := f.GlyphIndex(&fontBuf, r); err == nil && idx != 0 {
-				return f, idx
-			}
-		}
-	}
-	return nil, 0
-}
-
 func isBold(weight string) bool {
 	weight = strings.ToLower(strings.TrimSpace(weight))
 	if weight == "bold" || weight == "bolder" {
@@ -202,38 +187,6 @@ func isBold(weight string) bool {
 		return true
 	}
 	return false
-}
-
-func lookupFont(family, weight string) *sfnt.Font {
-	fontRegistryMu.RLock()
-	defer fontRegistryMu.RUnlock()
-
-	// Parse fallback list, e.g. "'Arial Black', 'Impact', sans-serif"
-	families := strings.Split(family, ",")
-	for _, fam := range families {
-		fam = strings.TrimSpace(fam)
-		fam = strings.Trim(fam, `'"`) // Remove quotes
-		fam = strings.ToLower(fam)
-		if fam == "" {
-			continue
-		}
-
-		if isBold(weight) {
-			if f, ok := fontRegistry[fam+"-bold"]; ok {
-				return f
-			}
-		}
-		if f, ok := fontRegistry[fam]; ok {
-			return f
-		}
-	}
-
-	if isBold(weight) {
-		if f, ok := fontRegistry["default-bold"]; ok {
-			return f
-		}
-	}
-	return fontRegistry["default"]
 }
 
 func init() {
@@ -810,6 +763,16 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 		}
 	case "text-anchor":
 		curStyle.TextAnchor = v
+	case "font-style":
+		if v == "inherit" {
+			return nil
+		}
+		curStyle.FontStyle = strings.ToLower(strings.TrimSpace(v))
+	case "dominant-baseline":
+		if v == "inherit" {
+			return nil
+		}
+		curStyle.DominantBaseline = strings.ToLower(strings.TrimSpace(v))
 	case "font-weight":
 		curStyle.FontWeight = v
 	case "marker-start", "marker-mid", "marker-end", "marker":
@@ -1612,7 +1575,7 @@ func (c *IconCursor) bitmapGlyph(fnt *sfnt.Font, idx sfnt.GlyphIndex, pngBytes [
 // upper clamp keeps fixed.Int26_6 (int32) arithmetic inside sfnt safe from
 // overflow on attacker-controlled font-size values.
 func fragmentPPEM(fontSize float64) fixed.Int26_6 {
-	if fontSize <= 0 {
+	if math.IsNaN(fontSize) || fontSize <= 0 {
 		fontSize = 12.0
 	}
 	if fontSize > maxFontSize {
@@ -1649,7 +1612,7 @@ func registryFont(name string) *sfnt.Font {
 // (startX+shiftX, startY), then for each fragment applies its x/y/dx/dy (dx/dy
 // exactly once — fixing the historical double-application of the first
 // fragment's dx/dy), resolves each rune to a glyph (regional-indicator flag
-// ligature -> per-rune fallback font -> .notdef), applies kerning, calls visit
+// ligature -> cluster fallback font -> .notdef), applies kerning, calls visit
 // with the pen position BEFORE the glyph's advance, then advances the pen. The
 // advance always comes from GlyphAdvance — including for bitmap/sbix glyphs —
 // so a measurement walk (no-op visit) and a layout walk stay in lockstep. It
@@ -1662,14 +1625,17 @@ func (c *IconCursor) walkTextGlyphs(frags []textFragment, startX, startY, shiftX
 	penY := startY
 	var prevIdx sfnt.GlyphIndex
 	var prevFont *sfnt.Font
+	var prevPPEM fixed.Int26_6
 
 	for fi := range frags {
 		frag := &frags[fi]
-		fontObj := lookupFont(frag.style.FontFamily, frag.style.FontWeight)
-		if fontObj == nil {
+		fonts := textFontCandidates(frag.style)
+		if len(fonts) == 0 {
 			continue
 		}
 
+		fontObj := fonts[0]
+		baseline := baselineOffset(frag.style, fontObj, buf)
 		if frag.hasX {
 			penX = frag.x + shiftX
 		}
@@ -1681,15 +1647,27 @@ func (c *IconCursor) walkTextGlyphs(frags []textFragment, startX, startY, shiftX
 
 		ppem := fragmentPPEM(frag.style.FontSize)
 
-		if fontObj != prevFont {
+		if ppem != prevPPEM {
 			prevIdx = 0
-			prevFont = fontObj
 		}
+		prevPPEM = ppem
 
 		runes := []rune(frag.text)
+		clusterEnd := 0
+		clusterFace := fontObj
 		for i := 0; i < len(runes); i++ {
 			r := runes[i]
-			useFont := fontObj
+			if i >= clusterEnd {
+				clusterEnd = i + 1
+				for clusterEnd < len(runes) && combining(runes[clusterEnd]) {
+					clusterEnd++
+				}
+				clusterFace = clusterFont(fonts, runes[i:clusterEnd], buf)
+				if i == 0 && combining(r) && prevFont != nil {
+					clusterFace = prevFont
+				}
+			}
+			useFont := clusterFace
 			var idx sfnt.GlyphIndex
 
 			isFlag := false
@@ -1708,20 +1686,7 @@ func (c *IconCursor) walkTextGlyphs(frags []textFragment, startX, startY, shiftX
 			}
 
 			if !isFlag {
-				gi, err := useFont.GlyphIndex(buf, r)
-				switch {
-				case err == nil && gi != 0:
-					idx = gi
-				default:
-					// Missing from the fragment's font: try the fallback chain,
-					// else fall back to the fragment font's .notdef (idx 0).
-					if f, fallbackIdx := resolveFallbackGlyph(r); f != nil {
-						useFont = f
-						idx = fallbackIdx
-					} else {
-						idx = 0
-					}
-				}
+				idx, _ = useFont.GlyphIndex(buf, r)
 			}
 
 			if useFont != prevFont {
@@ -1736,7 +1701,7 @@ func (c *IconCursor) walkTextGlyphs(frags []textFragment, startX, startY, shiftX
 				}
 			}
 
-			visit(glyphVisit{frag: frag, font: useFont, idx: idx, ppem: ppem, penX: penX, penY: penY})
+			visit(glyphVisit{frag: frag, font: useFont, idx: idx, ppem: ppem, penX: penX, penY: penY + baseline})
 
 			if adv, err := useFont.GlyphAdvance(buf, idx, ppem, font.HintingNone); err == nil {
 				penX += float64(adv) / 64
@@ -1759,6 +1724,9 @@ type textEmitter struct {
 }
 
 func (e *textEmitter) emit(g glyphVisit) {
+	if g.idx == 0 {
+		e.c.icon.MissingGlyphs++
+	}
 	if e.curFrag != nil && g.frag != e.curFrag {
 		e.flush()
 	}
@@ -1886,7 +1854,7 @@ func (c *IconCursor) compileText() error {
 	}
 	// System/emoji fonts load lazily on the first text layout (see
 	// LoadSystemFonts) so importers that never render text don't pay the cost.
-	LoadSystemFonts()
+	loadTextSystemFonts()
 
 	frags := c.textFragments
 	c.textFragments = nil

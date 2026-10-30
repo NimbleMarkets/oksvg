@@ -313,3 +313,5 @@ example icons shown below, which are also used as test icons in the `testdata` f
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).
+
+SVG text configuration and measurement: see [TEXT.md](TEXT.md).

@@ -13,18 +13,19 @@ import (
 
 // SvgIcon holds data from parsed SVGs.
 type SvgIcon struct {
-	ViewBox      struct{ X, Y, W, H float64 }
-	Titles       []string // Title elements collect here
-	Descriptions []string // Description elements collect here
-	Grads        map[string]*rasterx.Gradient
-	Patterns     map[string]*Pattern
-	Defs         map[string][]definition
-	SVGPaths     []SvgPath
-	SVGImages    []SvgImage
-	Transform    rasterx.Matrix2D
-	DrawTarget   draw.Image
-	classes      map[string]styleAttribute
-	drawOrder    int // monotonically increasing draw-order stamp source
+	ViewBox       struct{ X, Y, W, H float64 }
+	Titles        []string // Title elements collect here
+	Descriptions  []string // Description elements collect here
+	Grads         map[string]*rasterx.Gradient
+	Patterns      map[string]*Pattern
+	Defs          map[string][]definition
+	SVGPaths      []SvgPath
+	SVGImages     []SvgImage
+	Transform     rasterx.Matrix2D
+	DrawTarget    draw.Image
+	MissingGlyphs int // Missing characters laid out with the selected face's .notdef glyph.
+	classes       map[string]styleAttribute
+	drawOrder     int // monotonically increasing draw-order stamp source
 }
 
 // nextOrder returns the next draw-order stamp and advances the counter. Vector

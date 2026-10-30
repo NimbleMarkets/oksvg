@@ -28,6 +28,8 @@ type PathStyle struct {
 	FontSize                          float64
 	TextAnchor                        string
 	FontWeight                        string
+	FontStyle                         string
+	DominantBaseline                  string
 
 	// groupOpacity is the accumulated opacity contributed by ancestor group
 	// (<g opacity=...>) elements. It multiplies the element's own fill/line
