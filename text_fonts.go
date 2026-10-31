@@ -275,3 +275,50 @@ func RegisterFontAlias(alias, family string) error {
 	}
 	return nil
 }
+
+// Layout-local, bounded caches avoid repeated registry work without retaining
+// document styles globally or reusing results after host font registration.
+type textFontCache struct {
+	entries [8]textFontCacheEntry
+	next    int
+}
+type textFontCacheEntry struct {
+	family, weight, style string
+	fonts                 []*sfnt.Font
+}
+
+func (c *textFontCache) candidates(s PathStyle) []*sfnt.Font {
+	for i := range c.entries {
+		e := &c.entries[i]
+		if e.fonts != nil && e.family == s.FontFamily && e.weight == s.FontWeight && e.style == s.FontStyle {
+			return e.fonts
+		}
+	}
+	fonts := textFontCandidates(s)
+	c.entries[c.next] = textFontCacheEntry{s.FontFamily, s.FontWeight, s.FontStyle, fonts}
+	c.next = (c.next + 1) % len(c.entries)
+	return fonts
+}
+
+type textBitmapFont struct {
+	font   *sfnt.Font
+	data   []byte
+	strike *sbixStrike
+}
+
+func (e *textEmitter) bitmapFont(f *sfnt.Font) textBitmapFont {
+	for _, entry := range e.bitmapFonts {
+		if entry.font == f {
+			return entry
+		}
+	}
+	data, index := findFontBytesAndIndex(f)
+	var strike *sbixStrike
+	if data != nil {
+		strike, _ = sbixStrikeForFont(data, index)
+	}
+	entry := textBitmapFont{f, data, strike}
+	e.bitmapFonts[e.nextBitmapFont] = entry
+	e.nextBitmapFont = (e.nextBitmapFont + 1) % len(e.bitmapFonts)
+	return entry
+}

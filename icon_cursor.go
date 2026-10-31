@@ -1626,10 +1626,11 @@ func (c *IconCursor) walkTextGlyphs(frags []textFragment, startX, startY, shiftX
 	var prevIdx sfnt.GlyphIndex
 	var prevFont *sfnt.Font
 	var prevPPEM fixed.Int26_6
+	var fontCache textFontCache
 
 	for fi := range frags {
 		frag := &frags[fi]
-		fonts := textFontCandidates(frag.style)
+		fonts := fontCache.candidates(frag.style)
 		if len(fonts) == 0 {
 			continue
 		}
@@ -1717,10 +1718,12 @@ func (c *IconCursor) walkTextGlyphs(frags []textFragment, startX, startY, shiftX
 // bitmap / sbix glyphs). It is driven by walkTextGlyphs via emit; flush() must
 // be called after the walk to append the final fragment's accumulated outline.
 type textEmitter struct {
-	c        *IconCursor
-	buf      *sfnt.Buffer
-	curFrag  *textFragment
-	fragPath rasterx.Path
+	c              *IconCursor
+	buf            *sfnt.Buffer
+	curFrag        *textFragment
+	fragPath       rasterx.Path
+	bitmapFonts    [8]textBitmapFont
+	nextBitmapFont int
 }
 
 func (e *textEmitter) emit(g glyphVisit) {
@@ -1733,8 +1736,8 @@ func (e *textEmitter) emit(g glyphVisit) {
 	e.curFrag = g.frag
 
 	// Bitmap-first: place a color bitmap (sbix) glyph if the font has one.
-	if bytesData, index := findFontBytesAndIndex(g.font); bytesData != nil {
-		if pngBytes, originX, originY, maxPPEM, err := parseSBIX(bytesData, index, int(g.idx)); err == nil && pngBytes != nil && maxPPEM > 0 {
+	if bf := e.bitmapFont(g.font); bf.strike != nil {
+		if pngBytes, originX, originY, maxPPEM, err := parseSBIXGlyph(bf.data, bf.strike, int(g.idx)); err == nil && pngBytes != nil && maxPPEM > 0 {
 			if img, derr := e.c.bitmapGlyph(g.font, g.idx, pngBytes); derr == nil {
 				// Scale from the strike's native design size (maxPPEM) to the
 				// requested, already-clamped ppem — not the raw FontSize — so an
@@ -1880,16 +1883,15 @@ func (c *IconCursor) compileText() error {
 			startX = chunk[0].x
 		}
 
-		// Measurement pass: chunk width is pen travel with no anchor shift.
-		mEndX, _ := c.walkTextGlyphs(chunk, startX, penY, 0, &buf, func(glyphVisit) {})
-		width := mEndX - startX
-
+		// Only anchored chunks need a separate width measurement.
 		var shiftX float64
-		switch chunk[0].style.TextAnchor {
-		case "middle":
-			shiftX = -width / 2
-		case "end":
-			shiftX = -width
+		anchor := chunk[0].style.TextAnchor
+		if anchor == "middle" || anchor == "end" {
+			mEndX, _ := c.walkTextGlyphs(chunk, startX, penY, 0, &buf, func(glyphVisit) {})
+			shiftX = startX - mEndX
+			if anchor == "middle" {
+				shiftX /= 2
+			}
 		}
 
 		// Layout pass: emit glyphs at the anchored pen positions.

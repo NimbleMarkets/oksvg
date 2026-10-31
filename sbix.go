@@ -219,6 +219,14 @@ func parseSBIX(fontBytes []byte, fontIndex int, glyphIndex int) (pngBytes []byte
 		return nil, 0, 0, 0, err
 	}
 
+	return parseSBIXGlyph(fontBytes, strike, glyphIndex)
+}
+
+// parseSBIXGlyph uses an already resolved strike; retain all glyph bounds checks.
+func parseSBIXGlyph(fontBytes []byte, strike *sbixStrike, glyphIndex int) (pngBytes []byte, originX, originY int, maxPPEM int, err error) {
+	if glyphIndex < 0 {
+		return nil, 0, 0, 0, errors.New("invalid glyph index")
+	}
 	bestSizeOffset := int64(strike.bestSizeOffset)
 	sbixEnd := int64(strike.sbixEnd)
 

@@ -112,3 +112,26 @@ using identical font files. That visual check is not an SVG conformance claim.
 
 `go test -run '^$' -bench BenchmarkSVGText -benchmem` records warm measurement and
 parse costs. Glyph-outline caching and shaping integration are subsequent work.
+
+### Text compilation performance
+
+Font candidate lists are cached in an eight-entry cache local to each glyph
+walk. Bitmap strike availability (including fonts without bitmap glyphs) is
+cached in an eight-entry cache local to each text emitter. Neither cache grows
+with document length or survives into another layout. Middle/end anchors still
+measure before emission; start anchors emit directly without a redundant walk.
+
+`go test -run '^$' -bench '^BenchmarkRelativeText$' -benchmem -count=5`
+measures a warm 832-rune run and plain/nested SVG text compilation. On an Apple
+M5 Max, the median before/after this optimization was:
+
+| Operation | Before | Optimized | Allocations before/after |
+| --- | ---: | ---: | ---: |
+| Glyph measurement | 19.8 µs | 20.0 µs | 8 / 8 |
+| Plain text compilation | 266 µs | 183 µs | 469 / 80 |
+| Nested styled compilation | 351 µs | 199 µs | 4560 / 2257 |
+
+These timings exclude startup font loading and rasterization. The nested case
+includes bold italic spans and central baseline alignment; both sides implement
+the same behavior. A before/after raster comparison of nested text with all
+three anchors and five baselines produced identical pixels in all 15 cases.
