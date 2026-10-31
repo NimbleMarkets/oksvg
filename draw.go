@@ -133,7 +133,8 @@ var (
 	}
 	gF    svgFunc = func(*IconCursor, []xml.Attr) error { return nil } // g does nothing but push the style
 	rectF svgFunc = func(c *IconCursor, attrs []xml.Attr) error {
-		var x, y, w, h, rx, ry float64
+		var x, y, w, h float64
+		rx, ry := -1.0, -1.0
 		var err error
 		for _, attr := range attrs {
 			switch attr.Name.Local {
@@ -157,6 +158,16 @@ var (
 		if w == 0 || h == 0 {
 			return nil
 		}
+		// Missing or invalid negative radii take the other radius's value.
+		// Keep explicit zero values: either zero disables corner rounding.
+		if rx < 0 && ry < 0 {
+			rx, ry = 0, 0
+		} else if rx < 0 {
+			rx = ry
+		} else if ry < 0 {
+			ry = rx
+		}
+		// AddRoundRect clamps each radius to half its corresponding dimension.
 		rasterx.AddRoundRect(x, y, w+x, h+y, rx, ry, 0, rasterx.RoundGap, &c.Path)
 		return nil
 	}
