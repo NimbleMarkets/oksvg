@@ -16,6 +16,16 @@ including the newer 'arc' join-mode.
 
 ![arcs and caps](doc/TestShapes.png)
 
+## Fill rules
+
+`fill-rule` is parsed from presentation attributes, class declarations and inline
+styles, with inheritance and per-element overrides. The parsed winding rule is
+passed to the rasterx scanner. Pixel-correct `evenodd` rendering requires a
+scanner implementing `SetWinding(false)`; older ScannerGV versions silently
+ignored that switch. The local rasterx fix adds parity scan conversion; update
+to its published release when available. Parsing the property alone does not
+fix holes when an older scanner remains linked.
+
 ## Install
 
 ```

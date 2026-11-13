@@ -555,6 +555,19 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 		if v == "inherit" && len(c.StyleStack) > 0 {
 			curStyle.visibilityHidden = c.StyleStack[len(c.StyleStack)-1].visibilityHidden
 		}
+	case "fill-rule":
+		switch v {
+		case "nonzero", "initial":
+			curStyle.UseNonZeroWinding = true
+		case "evenodd":
+			curStyle.UseNonZeroWinding = false
+		case "inherit", "unset":
+			if len(c.StyleStack) > 0 {
+				curStyle.UseNonZeroWinding = c.StyleStack[len(c.StyleStack)-1].UseNonZeroWinding
+			}
+		default:
+			return fmt.Errorf("invalid fill-rule %q", v)
+		}
 	case "fill":
 		// Any explicit fill supersedes an inherited unresolved paint ref.
 		curStyle.pendingFillURL = ""
