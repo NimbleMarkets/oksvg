@@ -44,3 +44,39 @@ func TestFillRuleInvalidKeepsPriorValue(t *testing.T) {
 		t.Fatal("invalid declaration overwrote evenodd")
 	}
 }
+
+// Exercise the parser and the published scanner together. Both subpaths have
+// the same direction, so only even-odd winding cuts out the center. The second
+// path checks that a preceding even-odd fill does not leak into default fills.
+func TestFillRuleRenderedHoles(t *testing.T) {
+	for _, tc := range []struct {
+		name, attr  string
+		centerAlpha uint8
+	}{
+		{"default", "", 255},
+		{"nonzero", `fill-rule="nonzero"`, 255},
+		{"evenodd", `fill-rule="evenodd"`, 0},
+		{"inline", `style="fill-rule:evenodd"`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `<svg viewBox="0 0 32 16"><g ` + tc.attr + `><path fill="#ff0000" d="M1 1H15V15H1Z M5 5H11V11H5Z"/></g><path fill="#ff0000" d="M17 1H31V15H17Z M21 5H27V11H21Z"/></svg>`
+			icon, err := ReadIconStream(strings.NewReader(src), StrictErrorMode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, scale := range []int{1, 2} {
+				img := renderIcon(icon, 32*scale, 16*scale)
+				for _, p := range []struct {
+					x, y  int
+					alpha uint8
+				}{
+					{8, 8, tc.centerAlpha}, {2, 8, 255}, {0, 8, 0}, {24, 8, 255},
+				} {
+					if got := img.RGBAAt(p.x*scale, p.y*scale).A; got != p.alpha {
+						t.Errorf("scale %d pixel (%d,%d): alpha %d, want %d", scale, p.x, p.y, got, p.alpha)
+					}
+				}
+			}
+		})
+	}
+}

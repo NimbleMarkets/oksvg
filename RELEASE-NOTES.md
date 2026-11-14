@@ -9,31 +9,25 @@ as the interior of the Rust gear logo, when paired with a supporting scanner.
   configured parser error mode and do not overwrite an earlier valid value.
 - Add regressions for declaration precedence, inheritance and invalid values.
 
-## Dependency prerequisite
+## Rasterizer dependency
 
-The parser fix alone cannot repair an old ScannerGV whose winding switch is a
-no-op. Before publication, after rasterx v0.1.1 is available:
-
-1. Add `replace github.com/srwiley/rasterx => github.com/neomantra/rasterx v0.1.1`
-   to go.mod, run `GOWORK=off CGO_ENABLED=0 go mod tidy`, and commit the module
-   changes. Do not point this release at an unpublished version or local path.
-2. Run build, vet and the full tests with GOWORK=off, including an end-to-end
-   even-odd hole pixel regression against the published scanner.
-3. Publish the reviewed **nm** branch and tag `v0.1.7` to **origin**
-   (`NimbleMarkets/oksvg`).
-
+Standalone builds now replace `github.com/srwiley/rasterx` with the published
+`github.com/neomantra/rasterx v0.1.1`, which implements even-odd winding.
 Consumers such as ntbrowser must update both their oksvg requirement and their
 own rasterx replacement: Go ignores replacement directives in dependencies.
-Branch pushes are separate from release publication; no release tag has been created.
 
-## Validation before publication
+## Validation
 
-Standalone tests and vet pass with `GOWORK=off CGO_ENABLED=0`.
-Testing oksvg with the local rasterx candidate produces three golden failures:
+An end-to-end pixel regression checks inherited and inline even-odd holes,
+nonzero/default fills, and winding reset between paths at native and 2x size.
+
+Three golden images were refreshed for the fork's existing rasterization:
 `gradient_userspace@1x`, `pattern_fill@1x` and `pattern_fill@2x`.
-All three also fail with the published rasterx v0.1.0 fork, with identical
-mismatch counts and maximum deltas against the upstream-scanner goldens.
-The pattern outputs are byte-identical between fork versions; the gradient
-changes only four pixels by one channel level, within the golden tolerance.
-These baseline differences must be reviewed when oksvg adopts the fork;
-the combined full suite is not yet green. Existing goldens were preserved.
+The same three comparisons failed with the published rasterx v0.1.0 fork,
+with identical mismatch counts and maximum deltas against upstream goldens.
+Pattern output is byte-identical between fork versions; the gradient changes
+only four pixels by one channel level, within the existing tolerance.
+Visual review showed no structural changes. Golden tolerances are unchanged.
+
+Release target: tag the reviewed **nm** branch as `v0.1.7` on **origin**
+(`NimbleMarkets/oksvg`). No release tag has been created yet.
